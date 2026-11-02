@@ -10,6 +10,10 @@ def rand(n, dim=16, seed=0):
 
 def make(tmp_path, **kw):
     kw.setdefault("seal_threshold", 64)
+    # Deterministic, synchronous seals and always use the HNSW path; the
+    # background and planner paths have their own tests.
+    kw.setdefault("background_seal", False)
+    kw.setdefault("exact_search_limit", 0)
     return Collection(tmp_path / "c", CollectionConfig(dim=16, **kw))
 
 

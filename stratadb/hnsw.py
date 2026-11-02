@@ -87,6 +87,14 @@ class HNSWIndex:
         dots = vecs @ q
         return 1.0 - dots if self.metric == "cosine" else -dots
 
+    def _pairwise(self, labels) -> np.ndarray:
+        vecs = self._vectors[labels]
+        gram = vecs @ vecs.T
+        if self.metric == "l2":
+            sq = np.einsum("ij,ij->i", vecs, vecs)
+            return sq[:, None] + sq[None, :] - 2 * gram
+        return 1.0 - gram if self.metric == "cosine" else -gram
+
     def _dist(self, q: np.ndarray, label: int) -> float:
         v = self._vectors[label]
         if self.metric == "l2":
@@ -137,17 +145,23 @@ class HNSWIndex:
         """Heuristic selection (paper, alg. 4): keep a candidate only if it is closer
         to the base node than to every neighbour already kept. Spreads links out so
         the graph stays navigable across clusters."""
+        if len(candidates) <= 1:
+            return [c for _, c in candidates]
+        labels = [c for _, c in candidates]
+        base = [d for d, _ in candidates]
+        # One matrix op for all candidate-to-candidate distances, then a running
+        # "distance to nearest kept neighbour" vector: far cheaper than one numpy
+        # call per (candidate, kept) pair.
+        pair = self._pairwise(labels)
+        nearest_kept = np.full(len(labels), np.inf, dtype=np.float32)
         selected: list[int] = []
         discarded: list[int] = []
-        for d, c in candidates:
+        for i, c in enumerate(labels):
             if len(selected) >= m:
                 break
-            if not selected:
+            if base[i] < nearest_kept[i]:
                 selected.append(c)
-                continue
-            to_selected = self._dist_many(self._vectors[c], selected)
-            if np.all(d < to_selected):
-                selected.append(c)
+                np.minimum(nearest_kept, pair[i], out=nearest_kept)
             else:
                 discarded.append(c)
         # Top up with the closest discarded ones so low-degree nodes aren't stranded.

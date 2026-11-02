@@ -63,6 +63,7 @@ class Database:
         with self._lock:
             col = self._collections.pop(name, None)
             if col is not None:
+                col.wait_for_seal()
                 col.wal.close()
                 col._closed = True
             path = self.path / name

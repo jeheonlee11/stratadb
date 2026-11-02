@@ -19,6 +19,7 @@ acknowledged write.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import threading
 from dataclasses import asdict, dataclass
@@ -30,10 +31,13 @@ import numpy as np
 from .filters import compile_filter
 from .graph import GraphStore
 from .hnsw import METRICS
-from .segment import GrowingSegment, SealedSegment, atomic_write_json, distances, prepare
+from .segment import GrowingSegment, SealedSegment, atomic_write_json, distances, prepare, save_records
 from .wal import WriteAheadLog
 
-GROWING = -1
+log = logging.getLogger("stratadb")
+
+GROWING = -1  # locator value: record lives in the growing segment
+FROZEN = -2   # locator value: record lives in the segment being sealed
 
 
 @dataclass
@@ -43,10 +47,15 @@ class CollectionConfig:
     m: int = 16
     ef_construction: int = 128
     ef_search: int = 64
-    seal_threshold: int = 4096
+    seal_threshold: int = 16384
     sync: str = "flush"
     wal_checkpoint_bytes: int = 64 * 1024 * 1024
     compact_deleted_ratio: float = 0.3
+    # Build segment indexes on a worker thread instead of blocking writes.
+    background_seal: bool = True
+    # Segments with (live records x dim) at or below this are scanned exactly:
+    # a single matrix product beats a Python graph walk at that size.
+    exact_search_limit: int = 3_000_000
 
     def validate(self) -> None:
         if self.dim <= 0:
@@ -90,6 +99,10 @@ class Collection:
         self._next_seg = 1
         self._checkpoint_lsn = 0
         self._files: dict[str, str] = {}
+        self._generation = 0
+        self.frozen: GrowingSegment | None = None
+        self._seal_thread: threading.Thread | None = None
+        self._seal_error: Exception | None = None
         self._closed = False
         self._recover()
 
@@ -100,6 +113,7 @@ class Collection:
             manifest = json.loads(manifest_path.read_text())
             self._checkpoint_lsn = manifest["lsn"]
             self._next_seg = manifest["next_segment"]
+            self._generation = manifest.get("generation", 0)
             self._files = manifest.get("files", {})
             for seg in manifest["segments"]:
                 seg_path = self.path / f"seg-{seg['id']}"
@@ -126,8 +140,8 @@ class Collection:
             self._apply(entry.op, entry.data, entry.vectors)
             replayed += 1
         self.replayed_entries = replayed
-        if len(self.growing) >= self.config.seal_threshold:
-            self.seal()
+        if self._growing_full:
+            self.seal(only_if_full=True)
 
     def _remove_orphans(self) -> None:
         """Delete files a crash left behind that the manifest doesn't reference."""
@@ -163,25 +177,31 @@ class Collection:
         else:
             raise ValueError(f"unknown WAL op {op}")
 
+    def _segment(self, where: int):
+        if where == GROWING:
+            return self.growing
+        if where == FROZEN:
+            return self.frozen
+        return self.sealed[where]
+
     def _remove_location(self, rid: str) -> bool:
         where = self.locator.pop(rid, None)
         if where is None:
             return False
-        if where == GROWING:
-            self.growing.delete(rid)
-        else:
-            self.sealed[where].delete(rid)
+        self._segment(where).delete(rid)
         return True
 
     def _check_open(self) -> None:
         if self._closed:
             raise RuntimeError(f"collection {self.name!r} is closed")
 
-    def _after_write(self) -> None:
-        if len(self.growing) >= self.config.seal_threshold:
-            self.seal()
-        elif self.wal.size_bytes() >= self.config.wal_checkpoint_bytes:
+    def _maybe_checkpoint(self) -> None:
+        if self.wal.size_bytes() >= self.config.wal_checkpoint_bytes:
             self.checkpoint()
+
+    @property
+    def _growing_full(self) -> bool:
+        return len(self.growing) >= self.config.seal_threshold
 
     # ------------------------------------------------------------ write API
     def upsert(self, ids: list[str], vectors, metadata: list[dict] | None = None) -> int:
@@ -203,19 +223,24 @@ class Collection:
             vecs = vecs[order]
             metadata = [metadata[i] for i in order] if metadata is not None else None
         vecs = prepare(vecs, self.config.metric)
-        with self._lock:
-            self._check_open()
-            # Feed the growing segment in slices so a big batch seals into
-            # threshold-sized segments instead of one oversized one.
-            start = 0
-            while start < len(ids):
+        # Feed the growing segment in slices so a big batch seals into
+        # threshold-sized segments instead of one oversized one. Sealing runs
+        # outside the lock: it may wait for a previous background build.
+        start = 0
+        while start < len(ids):
+            with self._lock:
+                self._check_open()
                 room = max(1, self.config.seal_threshold - len(self.growing))
                 end = min(len(ids), start + room)
                 data = {"ids": ids[start:end], "metadata": metadata[start:end] if metadata is not None else None}
                 self.wal.append("upsert", data, vecs[start:end])
                 self._apply("upsert", data, vecs[start:end])
-                self._after_write()
-                start = end
+                full = self._growing_full
+                if not full:
+                    self._maybe_checkpoint()
+            if full:
+                self.seal(only_if_full=True)
+            start = end
         return len(ids)
 
     def delete(self, ids: Iterable[str]) -> int:
@@ -228,7 +253,7 @@ class Collection:
             if targets:
                 self.wal.append("delete", {"ids": targets})
                 self._apply("delete", {"ids": targets}, None)
-                self._after_write()
+                self._maybe_checkpoint()
             return len(present)
 
     def link(self, edges: list[dict]) -> int:
@@ -246,7 +271,7 @@ class Collection:
             if clean:
                 self.wal.append("link", {"edges": clean})
                 self._apply("link", {"edges": clean}, None)
-                self._after_write()
+                self._maybe_checkpoint()
         return len(clean)
 
     def unlink(self, edges: list[dict]) -> int:
@@ -270,7 +295,7 @@ class Collection:
         where = self.locator.get(rid)
         if where is None:
             return None
-        return (self.growing if where == GROWING else self.sealed[where]).get(rid)
+        return self._segment(where).get(rid)
 
     def get(self, ids: Iterable[str], include_vectors: bool = False) -> list[dict]:
         out = []
@@ -290,7 +315,8 @@ class Collection:
         pred = compile_filter(filter)
         out = []
         with self._lock:
-            for seg in [self.growing, *self.sealed.values()]:
+            segments = [self.growing, *([self.frozen] if self.frozen is not None else []), *self.sealed.values()]
+            for seg in segments:
                 for rid, _, meta in seg.records():
                     if pred is None or pred(meta):
                         out.append({"id": rid, "metadata": meta})
@@ -330,8 +356,11 @@ class Collection:
         with self._lock:
             self._check_open()
             hits = self.growing.search(q, pool_k, pred)
+            if self.frozen is not None:
+                hits.extend(self.frozen.search(q, pool_k, pred))
             for seg in self.sealed.values():
-                hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=pred))
+                hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=pred,
+                                       exact_limit=self.config.exact_search_limit))
             hits.sort()
             hits = hits[:pool_k]
             scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits]
@@ -400,28 +429,78 @@ class Collection:
             return self.graph.edges(str(rid), direction=direction, rel=rel)
 
     # ---------------------------------------------------------- maintenance
-    def seal(self) -> int | None:
-        """Freeze the growing segment into an indexed, immutable segment."""
+    def seal(self, wait: bool | None = None, only_if_full: bool = False) -> int | None:
+        """Freeze the growing segment and build its HNSW index.
+
+        With ``background_seal`` (the default) the index builds on a worker
+        thread: writes go to a fresh growing segment and the frozen one is still
+        searched by brute force until the indexed segment is swapped in. Only
+        one build runs at a time; a second seal waits for the first.
+        """
+        background = self.config.background_seal if wait is None else not wait
+        self._check_open()
+        self.wait_for_seal()
         with self._lock:
             self._check_open()
-            records = list(self.growing.records())
-            if not records:
+            if not len(self.growing) or (only_if_full and not self._growing_full):
                 return None
             seg_id = self._next_seg
             self._next_seg += 1
+            frozen = self.growing
+            self.frozen = frozen
+            self.growing = GrowingSegment(self.config.dim, self.config.metric)
+            for rid in frozen.pos:
+                self.locator[rid] = FROZEN
+            records = [(rid, vec.copy(), meta) for rid, vec, meta in frozen.records()]
+            if background:
+                self._seal_thread = threading.Thread(
+                    target=self._build_and_install, args=(seg_id, frozen, records),
+                    name=f"stratadb-seal-{self.name}-{seg_id}", daemon=True,
+                )
+                self._seal_thread.start()
+                return seg_id
+        self._build_and_install(seg_id, frozen, records)
+        return seg_id
+
+    def _build_and_install(self, seg_id: int, frozen: GrowingSegment, records) -> None:
+        try:
             segment = SealedSegment.build(
                 seg_id, self.path / f"seg-{seg_id}", records,
                 self.config.metric, self.config.m, self.config.ef_construction,
             )
+        except Exception as e:  # noqa: BLE001 - keep the data searchable, surface the error
+            log.exception("sealing segment %s of %s failed", seg_id, self.name)
+            with self._lock:
+                self._seal_error = e
+                for rid, vec, meta in frozen.records():
+                    if rid not in self.growing.pos:
+                        self.growing.put(rid, vec, meta)
+                        self.locator[rid] = GROWING
+                self.frozen = None
+            return
+        with self._lock:
+            # Records deleted or overwritten while the index was building left
+            # the frozen segment; tombstone them in the new one.
+            for rid in list(segment.pos):
+                if rid in frozen.pos:
+                    self.locator[rid] = seg_id
+                else:
+                    segment.delete(rid)
             self.sealed[seg_id] = segment
-            for rid in segment.pos:
-                self.locator[rid] = seg_id
-            self.growing = GrowingSegment(self.config.dim, self.config.metric)
-            self.checkpoint()
-            return seg_id
+            self.frozen = None
+            self._seal_error = None
+            if not self._closed:
+                self.checkpoint()
+
+    def wait_for_seal(self) -> None:
+        """Block until a background seal (if any) has finished."""
+        thread = self._seal_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
 
     def compact(self) -> dict:
         """Rewrite sealed segments that are mostly tombstones, and merge small ones."""
+        self.wait_for_seal()
         with self._lock:
             self._check_open()
             threshold = self.config.seal_threshold
@@ -456,14 +535,23 @@ class Collection:
         with self._lock:
             self._check_open()
             lsn = self.wal.last_lsn
+            # Snapshot names carry a generation that bumps on every checkpoint,
+            # so a new snapshot never overwrites the one the live manifest uses.
+            self._generation += 1
+            gen = self._generation
             files = {
-                "growing": [f"growing-{lsn}.npz", f"growing-{lsn}.json"],
-                "graph": f"graph-{lsn}.json",
+                "growing": [f"growing-{gen}.npz", f"growing-{gen}.json"],
+                "graph": f"graph-{gen}.json",
             }
-            self.growing.save(self.path / files["growing"][0], self.path / files["growing"][1])
+            # A segment being sealed in the background isn't on disk yet, so its
+            # records go into the growing snapshot too.
+            records = list(self.frozen.records()) if self.frozen is not None else []
+            records += list(self.growing.records())
+            save_records(records, self.config.dim, self.path / files["growing"][0], self.path / files["growing"][1])
             atomic_write_json(self.path / files["graph"], self.graph.to_list())
             manifest = {
                 "lsn": lsn,
+                "generation": gen,
                 "next_segment": self._next_seg,
                 "segments": [{"id": sid, "tombstones": s.tombstones} for sid, s in sorted(self.sealed.items())],
                 "files": files,
@@ -487,6 +575,7 @@ class Collection:
                 "dim": self.config.dim,
                 "metric": self.config.metric,
                 "growing": len(self.growing),
+                "sealing": len(self.frozen) if self.frozen is not None else 0,
                 "sealed_segments": [
                     {"id": sid, "live": len(s), "total": s.total, "deleted_ratio": round(s.deleted_ratio, 3)}
                     for sid, s in sorted(self.sealed.items())
@@ -498,6 +587,7 @@ class Collection:
             }
 
     def close(self) -> None:
+        self.wait_for_seal()
         with self._lock:
             if self._closed:
                 return

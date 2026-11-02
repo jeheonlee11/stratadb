@@ -52,6 +52,15 @@ def atomic_write_json(path: Path, obj) -> None:
     atomic_write_bytes(path, json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode())
 
 
+def save_records(records: list[tuple[str, np.ndarray, dict]], dim: int, npz_path: Path, json_path: Path) -> None:
+    """Write records as a growing-segment snapshot (vectors .npz + ids/metadata .json)."""
+    vectors = np.stack([vec for _, vec, _ in records]) if records else np.zeros((0, dim), np.float32)
+    tmp = npz_path.with_name(npz_path.name + ".tmp.npz")
+    np.savez(tmp, vectors=vectors)
+    os.replace(tmp, npz_path)
+    atomic_write_json(json_path, {"ids": [r[0] for r in records], "metas": [r[2] for r in records]})
+
+
 class GrowingSegment:
     def __init__(self, dim: int, metric: str, capacity: int = 256):
         self.dim = dim
@@ -109,17 +118,16 @@ class GrowingSegment:
         if not labels:
             return []
         dists = distances(q, self._vectors[labels], self.metric)
-        top = np.argsort(dists)[:k]
+        if k < len(dists):
+            top = np.argpartition(dists, k)[:k]
+            top = top[np.argsort(dists[top])]
+        else:
+            top = np.argsort(dists)
         return [(float(dists[i]), self.ids[labels[i]]) for i in top]
 
     # Snapshot: only live records are written, so a reload compacts the segment.
     def save(self, npz_path: Path, json_path: Path) -> None:
-        live = list(self.pos.items())
-        labels = [label for _, label in live]
-        tmp = npz_path.with_name(npz_path.name + ".tmp.npz")
-        np.savez(tmp, vectors=self._vectors[labels] if labels else np.zeros((0, self.dim), np.float32))
-        os.replace(tmp, npz_path)
-        atomic_write_json(json_path, {"ids": [rid for rid, _ in live], "metas": [self.metas[l] for l in labels]})
+        save_records(list(self.records()), self.dim, npz_path, json_path)
 
     @classmethod
     def load(cls, dim: int, metric: str, npz_path: Path, json_path: Path) -> "GrowingSegment":
@@ -212,12 +220,36 @@ class SealedSegment:
         for rid, label in self.pos.items():
             yield rid, vecs[label], self.metas[label]
 
+    def _exact(self, q: np.ndarray, k: int, labels) -> list[Hit]:
+        dists = distances(q, self.index.vectors[labels], self.index.metric)
+        if k < len(dists):
+            top = np.argpartition(dists, k)[:k]
+            top = top[np.argsort(dists[top])]
+        else:
+            top = np.argsort(dists)
+        return [(float(dists[i]), self.ids[labels[i]]) for i in top]
+
     def search(
-        self, q: np.ndarray, k: int, ef: int | None = None, pred: Callable[[dict], bool] | None = None
+        self,
+        q: np.ndarray,
+        k: int,
+        ef: int | None = None,
+        pred: Callable[[dict], bool] | None = None,
+        exact_limit: int = 0,
     ) -> list[Hit]:
+        """Search this segment, picking a plan:
+
+        - exact scan when (candidates x dim) <= ``exact_limit``: one matrix
+          product beats a Python graph walk on small segments, and it's exact
+        - exact scan over filter matches when the filter is selective
+        - HNSW otherwise (with the filter applied during the walk)
+        """
         if not self.pos:
             return []
+        dim = self.index.dim
         if pred is None:
+            if len(self.pos) * dim <= exact_limit:
+                return self._exact(q, k, list(self.pos.values()))
             hits = self.index.search(q, k, ef=ef)
             return [(d, self.ids[label]) for label, d in hits]
 
@@ -226,10 +258,8 @@ class SealedSegment:
             return []
         # Selective filters: exact search over the few matches beats walking a
         # graph where almost every node is rejected.
-        if len(allowed) <= max(k * 32, len(self.pos) // 20):
-            dists = distances(q, self.index.vectors[allowed], self.index.metric)
-            top = np.argsort(dists)[:k]
-            return [(float(dists[i]), self.ids[allowed[i]]) for i in top]
+        if len(allowed) * dim <= exact_limit or len(allowed) <= max(k * 32, len(self.pos) // 20):
+            return self._exact(q, k, allowed)
         allowed_set = set(allowed)
         hits = self.index.search(q, k, ef=ef, allow=allowed_set.__contains__)
         return [(d, self.ids[label]) for label, d in hits]
