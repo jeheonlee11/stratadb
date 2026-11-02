@@ -10,7 +10,7 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/upsert      {ids, vectors, metadata?}
     POST   /collections/<name>/delete      {ids}
     POST   /collections/<name>/get         {ids, include_vectors?}
-    POST   /collections/<name>/search      {vector, k?, filter?, ef?, include_vectors?, expand_hops?, graph_boost?}
+    POST   /collections/<name>/search      {vector? and/or text?, k?, filter?, ef?, include_vectors?, expand_hops?, graph_boost?}
     POST   /collections/<name>/scan        {filter?, limit?}
     POST   /collections/<name>/link        {edges}
     POST   /collections/<name>/unlink      {edges}
@@ -56,7 +56,7 @@ def _pick(body: dict, *keys: str) -> dict:
 
 
 COLLECTION_OPTIONS = ("m", "ef_construction", "ef_search", "seal_threshold", "sync",
-                      "wal_checkpoint_bytes", "compact_deleted_ratio", "background_seal", "exact_search_limit")
+                      "wal_checkpoint_bytes", "compact_deleted_ratio", "background_seal", "exact_search_limit", "text_field")
 
 
 class Api:
@@ -96,9 +96,9 @@ class Api:
                 "delete": lambda: (_require(body, "ids"), {"deleted": col.delete(body["ids"])})[1],
                 "get": lambda: (_require(body, "ids"),
                                 {"records": col.get(body["ids"], bool(body.get("include_vectors")))})[1],
-                "search": lambda: (_require(body, "vector"), {"hits": col.search(
-                    body["vector"], int(body.get("k", 10)),
-                    **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost"))})[1],
+                "search": lambda: {"hits": col.search(
+                    body.get("vector"), int(body.get("k", 10)),
+                    **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text"))},
                 "scan": lambda: {"records": col.scan(body.get("filter"), body.get("limit"))},
                 "link": lambda: (_require(body, "edges"), {"linked": col.link(body["edges"])})[1],
                 "unlink": lambda: (_require(body, "edges"), {"unlinked": col.unlink(body["edges"])})[1],

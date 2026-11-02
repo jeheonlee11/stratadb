@@ -32,6 +32,7 @@ from .filters import compile_filter
 from .graph import GraphStore
 from .hnsw import METRICS
 from .lockfile import DirectoryLock
+from .text_index import BM25Index, fuse_rrf
 from .segment import GrowingSegment, SealedSegment, atomic_write_json, distances, prepare, save_records
 from .wal import WriteAheadLog
 
@@ -57,6 +58,8 @@ class CollectionConfig:
     # Segments with (live records x dim) at or below this are scanned exactly:
     # a single matrix product beats a Python graph walk at that size.
     exact_search_limit: int = 3_000_000
+    # Metadata field to index for keyword (BM25) and hybrid search, e.g. "text".
+    text_field: str | None = None
 
     def validate(self) -> None:
         if self.dim <= 0:
@@ -104,6 +107,7 @@ class Collection:
         self.frozen: GrowingSegment | None = None
         self._seal_thread: threading.Thread | None = None
         self._seal_error: Exception | None = None
+        self.text_index: BM25Index | None = BM25Index() if self.config.text_field else None
         self._closed = False
         self._dir_lock = DirectoryLock(self.path)
         self._dir_lock.acquire()
@@ -138,6 +142,10 @@ class Collection:
             if "graph" in self._files:
                 self.graph = GraphStore.from_list(json.loads((self.path / self._files["graph"]).read_text()))
         self._remove_orphans()
+        if self.text_index is not None:
+            for seg in [self.growing, *self.sealed.values()]:
+                for rid, _, meta in seg.records():
+                    self._index_text(rid, meta)
 
         self.wal = WriteAheadLog(self.path / "wal.log", sync=self.config.sync)
         if self.wal.last_lsn < self._checkpoint_lsn:
@@ -171,10 +179,14 @@ class Collection:
                 self._remove_location(rid)
                 self.growing.put(rid, vec, meta)
                 self.locator[rid] = GROWING
+                if self.text_index is not None:
+                    self._index_text(rid, meta)
         elif op == "delete":
             for rid in data["ids"]:
                 self._remove_location(rid)
                 self.graph.remove_node(rid)
+                if self.text_index is not None:
+                    self.text_index.remove(rid)
         elif op == "link":
             for e in data["edges"]:
                 self.graph.add(e["src"], e["dst"], e.get("rel", "related"), e.get("weight", 1.0), e.get("props"))
@@ -183,6 +195,15 @@ class Collection:
                 self.graph.remove(e["src"], e["dst"], e.get("rel"))
         else:
             raise ValueError(f"unknown WAL op {op}")
+
+    def _index_text(self, rid: str, meta: dict) -> None:
+        value = meta
+        for part in self.config.text_field.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        if isinstance(value, str) and value:
+            self.text_index.add(rid, value)
+        else:
+            self.text_index.remove(rid)
 
     def _segment(self, where: int):
         if where == GROWING:
@@ -333,16 +354,21 @@ class Collection:
 
     def search(
         self,
-        vector,
+        vector=None,
         k: int = 10,
         filter: dict | None = None,
         ef: int | None = None,
         include_vectors: bool = False,
         expand_hops: int = 0,
         graph_boost: float = 0.0,
+        text: str | None = None,
     ) -> list[dict]:
-        """Nearest-neighbour search across all segments.
+        """Vector, keyword or hybrid search across all segments.
 
+        ``vector``       query embedding (nearest-neighbour search)
+        ``text``         keyword query against ``text_field`` (BM25); with a
+                         vector too, the two rankings are merged by reciprocal
+                         rank fusion
         ``filter``       metadata filter (see ``stratadb.filters``)
         ``expand_hops``  attach graph neighbours (up to N hops) to each hit
         ``graph_boost``  0..1; re-rank with spreading activation over edges, so
@@ -351,36 +377,76 @@ class Collection:
         """
         if k <= 0:
             return []
+        if vector is None and text is None:
+            raise ValueError("search needs a vector, text, or both")
+        if text is not None and self.text_index is None:
+            raise ValueError(f"collection {self.name!r} has no text_field; keyword search is unavailable")
         if not 0.0 <= graph_boost <= 1.0:
             raise ValueError("graph_boost must be between 0 and 1")
-        q = prepare(np.asarray(vector, dtype=np.float32).reshape(-1), self.config.metric)
-        if q.shape[0] != self.config.dim:
-            raise ValueError(f"expected dim {self.config.dim}, got {q.shape[0]}")
+        if graph_boost > 0 and vector is None:
+            raise ValueError("graph_boost needs a query vector")
+        q = None
+        if vector is not None:
+            q = prepare(np.asarray(vector, dtype=np.float32).reshape(-1), self.config.metric)
+            if q.shape[0] != self.config.dim:
+                raise ValueError(f"expected dim {self.config.dim}, got {q.shape[0]}")
         pred = compile_filter(filter)
         ef = ef or self.config.ef_search
-        pool_k = max(k * 4, 32) if graph_boost > 0 else k
+        hybrid = q is not None and text is not None
+        pool_k = max(k * 4, 32) if (graph_boost > 0 or hybrid) else k
 
         with self._lock:
             self._check_open()
-            hits = self.growing.search(q, pool_k, pred)
-            if self.frozen is not None:
-                hits.extend(self.frozen.search(q, pool_k, pred))
-            for seg in self.sealed.values():
-                hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=pred,
-                                       exact_limit=self.config.exact_search_limit))
-            hits.sort()
-            hits = hits[:pool_k]
-            scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits]
-            if graph_boost > 0 and scored:
-                scored = self._graph_rerank(q, scored, graph_boost, pred)
+            vec_info: dict[str, dict] = {}
+            vec_rank: list[str] = []
+            if q is not None:
+                hits = self.growing.search(q, pool_k, pred)
+                if self.frozen is not None:
+                    hits.extend(self.frozen.search(q, pool_k, pred))
+                for seg in self.sealed.values():
+                    hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=pred,
+                                           exact_limit=self.config.exact_search_limit))
+                hits.sort()
+                scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits[:pool_k]]
+                if graph_boost > 0 and scored:
+                    scored = self._graph_rerank(q, scored, graph_boost, pred)
+                for item in scored:
+                    info = {"score": item[0], "distance": item[1]}
+                    if graph_boost > 0:
+                        info["vector_score"], info["graph_score"] = item[3], item[4]
+                    vec_info[item[2]] = info
+                    vec_rank.append(item[2])
+
+            kw_scores: dict[str, float] = {}
+            kw_rank: list[str] = []
+            if text is not None:
+                def allow(rid: str) -> bool:
+                    found = self._locate(rid)
+                    return found is not None and (pred is None or pred(found[1]))
+
+                for score, rid in self.text_index.search(text, pool_k, allow=allow):
+                    kw_scores[rid] = score
+                    kw_rank.append(rid)
+
+            if hybrid:
+                order = fuse_rrf([vec_rank, kw_rank], k)
+            elif q is not None:
+                order = [(vec_info[rid]["score"], rid) for rid in vec_rank[:k]]
+            else:
+                order = [(kw_scores[rid], rid) for rid in kw_rank[:k]]
+
             results = []
-            for item in scored[:k]:
-                score, dist, rid = item[0], item[1], item[2]
+            for score, rid in order:
                 vec, meta = self._locate(rid)
-                res: dict[str, Any] = {"id": rid, "score": score, "distance": dist, "metadata": meta}
-                if graph_boost > 0:
-                    res["vector_score"] = item[3]
-                    res["graph_score"] = item[4]
+                res: dict[str, Any] = {"id": rid, "score": score, "metadata": meta}
+                if q is not None and not hybrid:
+                    res.update(vec_info[rid])
+                if hybrid:
+                    if rid in vec_info:
+                        res["vector_score"] = vec_info[rid].get("vector_score", vec_info[rid]["score"])
+                    res["keyword_score"] = kw_scores.get(rid, 0.0)
+                elif text is not None:
+                    res["keyword_score"] = score
                 if include_vectors:
                     res["vector"] = vec.tolist()
                 if expand_hops > 0:

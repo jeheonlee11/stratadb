@@ -77,10 +77,11 @@ class RemoteCollection:
     def get(self, ids, include_vectors: bool = False) -> list[dict]:
         return self._post("get", {"ids": list(ids), "include_vectors": include_vectors})["records"]
 
-    def search(self, vector, k: int = 10, filter=None, ef=None, include_vectors=False,
-               expand_hops: int = 0, graph_boost: float = 0.0) -> list[dict]:
-        body = {"vector": _jsonable(vector), "k": k, "filter": filter, "ef": ef,
-                "include_vectors": include_vectors, "expand_hops": expand_hops, "graph_boost": graph_boost}
+    def search(self, vector=None, k: int = 10, filter=None, ef=None, include_vectors=False,
+               expand_hops: int = 0, graph_boost: float = 0.0, text: str | None = None) -> list[dict]:
+        body = {"vector": None if vector is None else _jsonable(vector), "k": k, "filter": filter, "ef": ef,
+                "include_vectors": include_vectors, "expand_hops": expand_hops, "graph_boost": graph_boost,
+                "text": text}
         return self._post("search", body)["hits"]
 
     def scan(self, filter=None, limit=None) -> list[dict]:
