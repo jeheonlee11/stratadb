@@ -31,12 +31,22 @@ def main(argv=None) -> None:
         p.add_argument("--path", default="./data")
         p.add_argument("collection", nargs="?", help="collection name (default: all)")
 
+    p = sub.add_parser("backup", help="write a consistent copy of the database")
+    p.add_argument("--path", default="./data")
+    p.add_argument("--out", required=True, help="destination directory (must not exist)")
+
     args = parser.parse_args(argv)
     if args.cmd == "serve":
         logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                             format="%(asctime)s %(levelname)s %(message)s")
         from .server import serve
         serve(args.path, args.host, args.port, args.api_key)
+        return
+
+    if args.cmd == "backup":
+        with Database(args.path) as db:
+            names = db.backup(args.out)
+        print(json.dumps({"backed_up": names, "to": args.out}, indent=2))
         return
 
     with Database(args.path) as db:

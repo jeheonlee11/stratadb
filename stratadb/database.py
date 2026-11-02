@@ -77,6 +77,15 @@ class Database:
                 return True
             return False
 
+    def backup(self, dest: str | Path) -> list[str]:
+        """Back up every collection into ``dest/<name>``; returns the names copied."""
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=False)
+        names = self.list_collections()
+        for name in names:
+            self.collection(name).backup(dest / name)
+        return names
+
     def close(self) -> None:
         with self._lock:
             for col in self._collections.values():

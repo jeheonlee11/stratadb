@@ -259,3 +259,31 @@ def test_second_open_of_same_directory_is_refused(tmp_path):
         Collection(tmp_path / "c")
     col.close()
     Collection(tmp_path / "c").close()  # free again after close
+
+
+def test_backup_is_a_point_in_time_copy(tmp_path):
+    col = make(tmp_path, seal_threshold=30)
+    col.upsert(ids(70), rand(70), [{"i": i} for i in range(70)])
+    col.link([{"src": "r1", "dst": "r2"}])
+    col.put_nodes([{"id": "r1", "props": {"x": 1}}])
+    col.backup(tmp_path / "bak")
+    col.delete(["r1", "r50"])                      # changes after the backup
+    col.upsert(["new"], rand(1, seed=4))
+    copy = Collection(tmp_path / "bak")
+    assert len(copy) == 70 and "new" not in copy
+    assert copy.edges("r1")[0]["dst"] == "r2" and copy.get_nodes(["r1"]) == {"r1": {"x": 1}}
+    assert copy.search(rand(70)[50], 1)[0]["id"] == "r50"
+    with pytest.raises(FileExistsError):
+        col.backup(tmp_path / "bak")
+
+
+def test_database_backup_cli(tmp_path, capsys):
+    from stratadb.__main__ import main as cli
+
+    with Database(tmp_path / "db") as db:
+        db.create_collection("a", dim=4).upsert(["x"], [[1, 0, 0, 0]])
+        db.create_graph("g").put_nodes([{"id": "n"}])
+    cli(["backup", "--path", str(tmp_path / "db"), "--out", str(tmp_path / "bak")])
+    assert '"a"' in capsys.readouterr().out
+    with Database(tmp_path / "bak") as copy:
+        assert copy.list_collections() == ["a", "g"] and len(copy["a"]) == 1

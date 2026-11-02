@@ -690,6 +690,34 @@ class Collection:
                         (self.path / name).unlink(missing_ok=True)
             return lsn
 
+    def backup(self, dest: str | Path) -> Path:
+        """Write a consistent copy of this collection to ``dest`` (a new directory).
+
+        Checkpoints first, then copies exactly the files the manifest references
+        while holding the lock, so the copy is a point-in-time snapshot that
+        opens like any collection. Writes resume as soon as the copy finishes.
+        """
+        dest = Path(dest)
+        if dest.exists():
+            raise FileExistsError(f"{dest} already exists")
+        self.wait_for_seal()
+        with self._lock:
+            self._check_open()
+            self.checkpoint()
+            tmp = dest.with_name(dest.name + ".partial")
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True)
+            for name in ("config.json", "manifest.json"):
+                shutil.copy2(self.path / name, tmp / name)
+            for value in self._files.values():
+                for name in [value] if isinstance(value, str) else value:
+                    shutil.copy2(self.path / name, tmp / name)
+            for sid in self.sealed:
+                shutil.copytree(self.path / f"seg-{sid}", tmp / f"seg-{sid}")
+            (tmp / "wal.log").touch()
+        tmp.rename(dest)
+        return dest
+
     def stats(self) -> dict:
         with self._lock:
             return {
