@@ -77,7 +77,13 @@ def test_crash_during_build_loses_nothing(tmp_path, monkeypatch):
     reopened = Collection(tmp_path / "c", CollectionConfig(dim=16, seal_threshold=200, background_seal=False))
     assert len(reopened) == 231
     assert reopened.search(data[150], 1)[0]["id"] == "r150"
+    # A real crash takes the build thread with it. Here it is still parked in
+    # the gate, so mark the dead instance closed (no checkpoint on install)
+    # and let the thread finish before the test directory is removed.
+    col._closed = True
     gate.release.set()
+    col._seal_thread.join(10)
+    reopened.close()
 
 
 def test_failed_build_keeps_records_searchable(tmp_path, monkeypatch):
