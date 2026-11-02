@@ -42,7 +42,6 @@ import hmac
 import json
 import logging
 from importlib import resources
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 

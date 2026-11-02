@@ -1,7 +1,6 @@
 """Worker-process index builds: same results as in-process, and safe fallback."""
 
 import numpy as np
-import pytest
 
 from stratadb import Collection, CollectionConfig
 from stratadb.segment import SealedSegment
@@ -52,8 +51,6 @@ def test_two_segments_build_concurrently(tmp_path, monkeypatch):
     import threading
 
     started, release = threading.Semaphore(0), threading.Event()
-    real = SealedSegment.build_in_process.__func__
-
     def gated(cls, seg_id, path, records, metric, m, efc, pool):
         started.release()
         release.wait(10)
