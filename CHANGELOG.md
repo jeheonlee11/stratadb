@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 - **Parallel index builds**: segments build in worker processes
   (`build_processes`, default 2), several at a time, so bulk loads use
