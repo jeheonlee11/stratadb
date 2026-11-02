@@ -160,7 +160,8 @@ only to install the finished segment. The HTTP server is a
 
 ## Limits
 
-- Single process: two processes must not open the same collection.
+- Single process per collection: a `LOCK` file (flock / msvcrt) makes a
+  second process fail fast instead of corrupting the WAL.
 - Everything for a collection is held in memory.
 - The server has bearer-token auth only; put it behind TLS if it leaves
   localhost.

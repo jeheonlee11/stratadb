@@ -66,6 +66,7 @@ class Database:
                 col.wait_for_seal()
                 col.wal.close()
                 col._closed = True
+                col._dir_lock.release()
             path = self.path / name
             if path.exists():
                 shutil.rmtree(path)

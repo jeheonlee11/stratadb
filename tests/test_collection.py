@@ -93,7 +93,8 @@ def test_recovery_without_close(tmp_path):
     col.link([{"src": "r1", "dst": "r2", "rel": "cites"}])
     col.upsert(["r7"], rand(1, seed=3), [{"new": True}])
     expected = col.search(rand(1, seed=8)[0], 5)
-    # simulate a crash: no close(), no checkpoint for the last writes
+    # simulate a crash: no close(), no checkpoint; the dying process drops its lock
+    col._dir_lock.release()
     reopened = Collection(tmp_path / "c")
     assert reopened.replayed_entries > 0
     assert len(reopened) == 118
@@ -112,6 +113,7 @@ def test_recovery_with_torn_wal_tail(tmp_path):
     col.wal.close()
     wal = tmp_path / "c" / "wal.log"
     wal.write_bytes(wal.read_bytes()[:-3])
+    col._dir_lock.release()
     reopened = Collection(tmp_path / "c")
     assert "a" in reopened and "b" in reopened and "c" not in reopened
 
@@ -247,3 +249,13 @@ def test_graph_boost_ignores_weak_seeds(tmp_path):
     col.link([{"src": "weak", "dst": "hanger"}])
     top = [h["id"] for h in col.search(q, 3, graph_boost=0.5)]
     assert "hanger" not in top and "good" in top
+
+
+def test_second_open_of_same_directory_is_refused(tmp_path):
+    from stratadb.lockfile import LockedError
+
+    col = make(tmp_path)
+    with pytest.raises(LockedError):
+        Collection(tmp_path / "c")
+    col.close()
+    Collection(tmp_path / "c").close()  # free again after close

@@ -73,6 +73,7 @@ def test_crash_during_build_loses_nothing(tmp_path, monkeypatch):
     col.upsert(["late"], rand(1, seed=5))
     # Crash: the build never finishes and close() is never called.
     monkeypatch.undo()
+    col._dir_lock.release()
     reopened = Collection(tmp_path / "c", CollectionConfig(dim=16, seal_threshold=200, background_seal=False))
     assert len(reopened) == 231
     assert reopened.search(data[150], 1)[0]["id"] == "r150"

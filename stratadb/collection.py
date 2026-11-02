@@ -31,6 +31,7 @@ import numpy as np
 from .filters import compile_filter
 from .graph import GraphStore
 from .hnsw import METRICS
+from .lockfile import DirectoryLock
 from .segment import GrowingSegment, SealedSegment, atomic_write_json, distances, prepare, save_records
 from .wal import WriteAheadLog
 
@@ -104,7 +105,13 @@ class Collection:
         self._seal_thread: threading.Thread | None = None
         self._seal_error: Exception | None = None
         self._closed = False
-        self._recover()
+        self._dir_lock = DirectoryLock(self.path)
+        self._dir_lock.acquire()
+        try:
+            self._recover()
+        except BaseException:
+            self._dir_lock.release()
+            raise
 
     # ------------------------------------------------------------- recovery
     def _recover(self) -> None:
@@ -145,7 +152,7 @@ class Collection:
 
     def _remove_orphans(self) -> None:
         """Delete files a crash left behind that the manifest doesn't reference."""
-        keep = {f"seg-{sid}" for sid in self.sealed} | {"config.json", "manifest.json", "wal.log"}
+        keep = {f"seg-{sid}" for sid in self.sealed} | {"config.json", "manifest.json", "wal.log", "LOCK"}
         for value in self._files.values():
             keep.update([value] if isinstance(value, str) else value)
         for child in self.path.iterdir():
@@ -605,3 +612,4 @@ class Collection:
                 self.checkpoint()
             self.wal.close()
             self._closed = True
+            self._dir_lock.release()
