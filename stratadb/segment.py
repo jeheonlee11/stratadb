@@ -110,11 +110,10 @@ class GrowingSegment:
         for rid, label in self.pos.items():
             yield rid, self._vectors[label], self.metas[label]
 
-    def search(self, q: np.ndarray, k: int, pred: Callable[[dict], bool] | None = None) -> list[Hit]:
-        labels = [
-            label for label in self.pos.values()
-            if pred is None or pred(self.metas[label])
-        ]
+    def search(self, q: np.ndarray, k: int, pred: Callable[[dict], bool] | None = None,
+               candidates: set[str] | None = None) -> list[Hit]:
+        pool = self.pos.values() if candidates is None else (self.pos[r] for r in candidates if r in self.pos)
+        labels = [label for label in pool if pred is None or pred(self.metas[label])]
         if not labels:
             return []
         dists = distances(q, self._vectors[labels], self.metric)
@@ -236,24 +235,28 @@ class SealedSegment:
         ef: int | None = None,
         pred: Callable[[dict], bool] | None = None,
         exact_limit: int = 0,
+        candidates: set[str] | None = None,
     ) -> list[Hit]:
         """Search this segment, picking a plan:
 
         - exact scan when (candidates x dim) <= ``exact_limit``: one matrix
           product beats a Python graph walk on small segments, and it's exact
         - exact scan over filter matches when the filter is selective
+          (``candidates``, from a metadata index, limits which records the
+          filter is even checked on)
         - HNSW otherwise (with the filter applied during the walk)
         """
         if not self.pos:
             return []
         dim = self.index.dim
-        if pred is None:
+        if pred is None and candidates is None:
             if len(self.pos) * dim <= exact_limit:
                 return self._exact(q, k, list(self.pos.values()))
             hits = self.index.search(q, k, ef=ef)
             return [(d, self.ids[label]) for label, d in hits]
 
-        allowed = [label for label in self.pos.values() if pred(self.metas[label])]
+        pool = self.pos.values() if candidates is None else (self.pos[r] for r in candidates if r in self.pos)
+        allowed = [label for label in pool if pred is None or pred(self.metas[label])]
         if not allowed:
             return []
         # Selective filters: exact search over the few matches beats walking a

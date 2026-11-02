@@ -161,6 +161,20 @@ This is what lets a question about "battery manufacturers' employees" return
 the people linked to battery companies even when the people's own text never
 mentions batteries (`examples/graph_retrieval.py`).
 
+## Secondary indexes
+
+`index_fields=[...]` keeps, per field, a hash map from value to ids (equality
+and `$in`) and a lazily rebuilt sorted array of numeric values (ranges). For a
+filter, `MetaIndex.plan` intersects whatever the indexes can answer into a
+candidate set and reports whether that set is *exact*: every condition was
+answered by an index (no `$or`, `$ne`, unindexed field, unhashable values,
+NaN). Segments then check only the candidates, and skip the Python predicate
+entirely when the plan is exact. Equality uses dict lookup, so it agrees with
+Python `==` (`1 == 1.0 == True`); range indexes hold only numbers, matching the
+filter engine, where comparing a string with a number never matches.
+
+Like the BM25 index, these are derived state rebuilt from the records on open.
+
 ## Keyword and hybrid search
 
 A collection created with `text_field="..."` keeps a BM25 index (`k1=1.2`,

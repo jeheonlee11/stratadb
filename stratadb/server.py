@@ -61,7 +61,7 @@ def _pick(body: dict, *keys: str) -> dict:
 
 
 COLLECTION_OPTIONS = ("m", "ef_construction", "ef_search", "seal_threshold", "sync",
-                      "wal_checkpoint_bytes", "compact_deleted_ratio", "background_seal", "exact_search_limit", "text_field")
+                      "wal_checkpoint_bytes", "compact_deleted_ratio", "background_seal", "exact_search_limit", "text_field", "index_fields")
 
 
 class Api:

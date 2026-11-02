@@ -33,6 +33,7 @@ from .graph import GraphStore
 from .hnsw import METRICS
 from .lockfile import DirectoryLock
 from .text_index import BM25Index, fuse_rrf
+from .metaindex import MetaIndex
 from .segment import GrowingSegment, SealedSegment, atomic_write_json, distances, prepare, save_records
 from .wal import WriteAheadLog
 
@@ -60,6 +61,8 @@ class CollectionConfig:
     exact_search_limit: int = 3_000_000
     # Metadata field to index for keyword (BM25) and hybrid search, e.g. "text".
     text_field: str | None = None
+    # Metadata fields with secondary indexes (equality, $in, numeric ranges).
+    index_fields: list[str] | None = None
 
     def validate(self) -> None:
         if self.dim < 0:
@@ -108,6 +111,7 @@ class Collection:
         self._seal_thread: threading.Thread | None = None
         self._seal_error: Exception | None = None
         self.text_index: BM25Index | None = BM25Index() if self.config.text_field else None
+        self.meta_index: MetaIndex | None = MetaIndex(self.config.index_fields) if self.config.index_fields else None
         self._closed = False
         self._dir_lock = DirectoryLock(self.path)
         self._dir_lock.acquire()
@@ -142,10 +146,13 @@ class Collection:
             if "graph" in self._files:
                 self.graph = GraphStore.from_json(json.loads((self.path / self._files["graph"]).read_text()))
         self._remove_orphans()
-        if self.text_index is not None:
+        if self.text_index is not None or self.meta_index is not None:
             for seg in [self.growing, *self.sealed.values()]:
                 for rid, _, meta in seg.records():
-                    self._index_text(rid, meta)
+                    if self.text_index is not None:
+                        self._index_text(rid, meta)
+                    if self.meta_index is not None:
+                        self.meta_index.add(rid, meta)
 
         self.wal = WriteAheadLog(self.path / "wal.log", sync=self.config.sync)
         if self.wal.last_lsn < self._checkpoint_lsn:
@@ -181,12 +188,16 @@ class Collection:
                 self.locator[rid] = GROWING
                 if self.text_index is not None:
                     self._index_text(rid, meta)
+                if self.meta_index is not None:
+                    self.meta_index.add(rid, meta)
         elif op == "delete":
             for rid in data["ids"]:
                 self._remove_location(rid)
                 self.graph.remove_node(rid)
                 if self.text_index is not None:
                     self.text_index.remove(rid)
+                if self.meta_index is not None:
+                    self.meta_index.remove(rid)
         elif op == "link":
             for e in data["edges"]:
                 self.graph.add(e["src"], e["dst"], e.get("rel", "related"), e.get("weight", 1.0), e.get("props"))
@@ -383,6 +394,15 @@ class Collection:
         pred = compile_filter(filter)
         out = []
         with self._lock:
+            cands = self.meta_index.candidates(filter) if self.meta_index is not None and pred else None
+            if cands is not None:
+                for rid in sorted(cands):
+                    found = self._locate(rid)
+                    if found is not None and pred(found[1]):
+                        out.append({"id": rid, "metadata": found[1]})
+                        if limit is not None and len(out) >= limit:
+                            break
+                return out
             segments = [self.growing, *([self.frozen] if self.frozen is not None else []), *self.sealed.values()]
             for seg in segments:
                 for rid, _, meta in seg.records():
@@ -441,13 +461,16 @@ class Collection:
             self._check_open()
             vec_info: dict[str, dict] = {}
             vec_rank: list[str] = []
+            cands, exact = (self.meta_index.plan(filter) if self.meta_index is not None and pred
+                            else (None, False))
+            seg_pred = None if exact else pred  # exact index answers need no re-check
             if q is not None:
-                hits = self.growing.search(q, pool_k, pred)
+                hits = self.growing.search(q, pool_k, seg_pred, cands)
                 if self.frozen is not None:
-                    hits.extend(self.frozen.search(q, pool_k, pred))
+                    hits.extend(self.frozen.search(q, pool_k, seg_pred, cands))
                 for seg in self.sealed.values():
-                    hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=pred,
-                                           exact_limit=self.config.exact_search_limit))
+                    hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=seg_pred,
+                                           exact_limit=self.config.exact_search_limit, candidates=cands))
                 hits.sort()
                 scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits[:pool_k]]
                 if graph_boost > 0 and scored:

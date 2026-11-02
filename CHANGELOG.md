@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Secondary indexes** on metadata fields (`index_fields`): hash and
+  numeric-range indexes narrow filtered search; exact plans skip the
+  per-record filter check. 60x faster for selective equality filters.
+
 ## 0.2.0
 
 - **Hybrid search**: BM25 keyword index over a metadata field (`text_field`),

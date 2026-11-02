@@ -76,6 +76,10 @@ activation, so a weak, barely related match can't promote its neighbours.
   HNSW with the filter applied during the walk.
 - **Metadata filters**: `$eq $ne $gt $gte $lt $lte $in $nin $contains $prefix
   $exists`, dotted paths, `$and $or $not`.
+- **Secondary indexes** (`index_fields`): hash indexes for equality / `$in`
+  and sorted arrays for numeric ranges narrow filtered searches before any
+  record is checked; when the indexes answer the whole filter, the per-record
+  check is skipped entirely. Up to 60x faster filtered search.
 - **Graph layer**: typed, weighted edges with properties, node properties,
   N-hop neighbours, `expand_hops` and `graph_boost` in search, cascade on
   delete. Graph-only collections (`dim=0`) hold a knowledge graph with no
@@ -174,6 +178,7 @@ Set per collection at creation (`create_collection(name, dim, **options)`):
 | `wal_checkpoint_bytes` | 64 MB | checkpoint when the WAL grows past this |
 | `compact_deleted_ratio` | 0.3 | tombstone ratio that makes a segment a compaction candidate |
 | `text_field` | none | metadata field to index for keyword / hybrid search |
+| `index_fields` | none | metadata fields (dotted paths allowed) with secondary indexes |
 
 ## Benchmarks
 
@@ -195,6 +200,18 @@ queries, recall against exact cosine top-10
   segment); the HNSW index for those 20k vectors is ready about 40 s later,
   built in the background.
 - On disk: 33 MB for 20k x 384 vectors with index. Reopening takes under 0.1 s.
+
+**Filtered search with secondary indexes** (same 20k vectors, `index_fields=["src", "year"]`):
+
+| filter | no index | indexed |
+|---|---|---|
+| equality, 0.5% of records match | 4.25 ms | **0.07 ms** |
+| numeric range, 40% match | 13.2 ms | **3.75 ms** |
+| equality + range, 0.2% match | 10.4 ms | **0.59 ms** |
+
+A differential test runs every filter shape against indexed and unindexed
+twins (with tricky values: `1` vs `1.0` vs `True`, `None`, lists, NaN, numeric
+strings) and requires identical results.
 
 **Index quality vs. a reference implementation.** Same vectors and
 parameters (`M=16, ef_construction=128`, 20k x 384) through StrataDB's HNSW
