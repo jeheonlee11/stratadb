@@ -98,6 +98,12 @@ class RemoteCollection:
         body = {"id": rid, "hops": hops, "rel": rel, "direction": direction, "limit": limit, "hydrate": hydrate}
         return self._post("neighbors", body)["neighbors"]
 
+    def put_nodes(self, nodes: list[dict]) -> int:
+        return self._post("nodes", {"nodes": nodes})["put"]
+
+    def get_nodes(self, ids) -> dict[str, dict]:
+        return self._post("get_nodes", {"ids": list(ids)})["nodes"]
+
     def checkpoint(self) -> int:
         return self._post("checkpoint")["lsn"]
 

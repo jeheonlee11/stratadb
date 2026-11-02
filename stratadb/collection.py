@@ -62,8 +62,8 @@ class CollectionConfig:
     text_field: str | None = None
 
     def validate(self) -> None:
-        if self.dim <= 0:
-            raise ValueError("dim must be positive")
+        if self.dim < 0:
+            raise ValueError("dim must be positive (or 0 for a graph-only collection)")
         if self.metric not in METRICS:
             raise ValueError(f"metric must be one of {METRICS}")
         if self.seal_threshold < 2:
@@ -140,7 +140,7 @@ class Collection:
                 for rid in self.growing.pos:
                     self.locator[rid] = GROWING
             if "graph" in self._files:
-                self.graph = GraphStore.from_list(json.loads((self.path / self._files["graph"]).read_text()))
+                self.graph = GraphStore.from_json(json.loads((self.path / self._files["graph"]).read_text()))
         self._remove_orphans()
         if self.text_index is not None:
             for seg in [self.growing, *self.sealed.values()]:
@@ -193,6 +193,9 @@ class Collection:
         elif op == "unlink":
             for e in data["edges"]:
                 self.graph.remove(e["src"], e["dst"], e.get("rel"))
+        elif op == "put_nodes":
+            for n in data["nodes"]:
+                self.graph.put_node(n["id"], n.get("props"))
         else:
             raise ValueError(f"unknown WAL op {op}")
 
@@ -232,7 +235,12 @@ class Collection:
         return len(self.growing) >= self.config.seal_threshold
 
     # ------------------------------------------------------------ write API
+    def _require_vectors(self) -> None:
+        if self.config.dim == 0:
+            raise ValueError(f"collection {self.name!r} is graph-only (dim=0); use put_nodes / link")
+
     def upsert(self, ids: list[str], vectors, metadata: list[dict] | None = None) -> int:
+        self._require_vectors()
         ids = [str(i) for i in ids]
         vecs = np.asarray(vectors, dtype=np.float32)
         if vecs.ndim == 1:
@@ -275,9 +283,10 @@ class Collection:
         ids = [str(i) for i in ids]
         with self._lock:
             self._check_open()
-            present = [rid for rid in ids if rid in self.locator]
+            present = [rid for rid in ids if rid in self.locator or self.graph.has_node(rid)]
             # Edges can exist for ids that were never inserted, so log those too.
-            targets = [rid for rid in ids if rid in self.locator or self.graph.degree(rid)]
+            targets = [rid for rid in ids
+                       if rid in self.locator or self.graph.degree(rid) or self.graph.has_node(rid)]
             if targets:
                 self.wal.append("delete", {"ids": targets})
                 self._apply("delete", {"ids": targets}, None)
@@ -311,6 +320,32 @@ class Collection:
                 self.wal.append("unlink", {"edges": clean})
                 self._apply("unlink", {"edges": clean}, None)
             return before - len(self.graph)
+
+    def put_nodes(self, nodes: list[dict]) -> int:
+        """Set node properties: ``[{"id": ..., "props": {...}}]`` (replaces existing props)."""
+        clean = []
+        for n in nodes:
+            if "id" not in n:
+                raise ValueError("each node needs an id")
+            props = n.get("props") or {}
+            if not isinstance(props, dict):
+                raise ValueError("node props must be an object")
+            clean.append({"id": str(n["id"]), "props": props})
+        with self._lock:
+            self._check_open()
+            if clean:
+                self.wal.append("put_nodes", {"nodes": clean})
+                self._apply("put_nodes", {"nodes": clean}, None)
+                self._maybe_checkpoint()
+        return len(clean)
+
+    def get_nodes(self, ids: Iterable[str]) -> dict[str, dict]:
+        with self._lock:
+            return {str(i): dict(p) for i in ids if (p := self.graph.get_node(str(i))) is not None}
+
+    def node_ids(self) -> list[str]:
+        with self._lock:
+            return self.graph.node_ids()
 
     # ------------------------------------------------------------- read API
     def __len__(self) -> int:
@@ -377,6 +412,8 @@ class Collection:
         """
         if k <= 0:
             return []
+        if vector is not None:
+            self._require_vectors()
         if vector is None and text is None:
             raise ValueError("search needs a vector, text, or both")
         if text is not None and self.text_index is None:
@@ -631,7 +668,7 @@ class Collection:
             records = list(self.frozen.records()) if self.frozen is not None else []
             records += list(self.growing.records())
             save_records(records, self.config.dim, self.path / files["growing"][0], self.path / files["growing"][1])
-            atomic_write_json(self.path / files["graph"], self.graph.to_list())
+            atomic_write_json(self.path / files["graph"], self.graph.to_json())
             manifest = {
                 "lsn": lsn,
                 "generation": gen,
@@ -664,6 +701,7 @@ class Collection:
                     for sid, s in sorted(self.sealed.items())
                 ],
                 "edges": len(self.graph),
+                "nodes": self.graph.node_count,
                 "wal_bytes": self.wal.size_bytes(),
                 "checkpoint_lsn": self._checkpoint_lsn,
                 "last_lsn": self.wal.last_lsn,

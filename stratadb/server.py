@@ -15,6 +15,8 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/link        {edges}
     POST   /collections/<name>/unlink      {edges}
     POST   /collections/<name>/neighbors   {id, hops?, rel?, direction?, limit?, hydrate?}
+    POST   /collections/<name>/nodes       {nodes: [{id, props}]}
+    POST   /collections/<name>/get_nodes   {ids}
     POST   /collections/<name>/checkpoint
     POST   /collections/<name>/compact
 
@@ -104,6 +106,8 @@ class Api:
                 "unlink": lambda: (_require(body, "edges"), {"unlinked": col.unlink(body["edges"])})[1],
                 "neighbors": lambda: (_require(body, "id"), {"neighbors": col.neighbors(
                     body["id"], **_pick(body, "hops", "rel", "direction", "limit", "hydrate"))})[1],
+                "nodes": lambda: (_require(body, "nodes"), {"put": col.put_nodes(body["nodes"])})[1],
+                "get_nodes": lambda: (_require(body, "ids"), {"nodes": col.get_nodes(body["ids"])})[1],
                 "checkpoint": lambda: {"lsn": col.checkpoint()},
                 "compact": lambda: col.compact(),
             }.get(action)

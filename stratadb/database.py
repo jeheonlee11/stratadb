@@ -44,6 +44,10 @@ class Database:
             self._collections[name] = col
             return col
 
+    def create_graph(self, name: str, exist_ok: bool = True, **options) -> Collection:
+        """A graph-only collection (no vectors): nodes with properties and edges."""
+        return self.create_collection(name, dim=0, exist_ok=exist_ok, **options)
+
     def collection(self, name: str) -> Collection:
         _check_name(name)
         with self._lock:
