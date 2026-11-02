@@ -225,3 +225,25 @@ def test_database(tmp_path):
         assert len(db["docs"]) == 1
         with pytest.raises(ValueError):
             db.create_collection("docs", dim=32)  # dim mismatch with stored config
+
+
+def test_graph_boost_ignores_weak_seeds(tmp_path):
+    """A barely-matching record must not promote its neighbours over real matches."""
+    col = make(tmp_path)
+    q = np.zeros(16, np.float32)
+    q[0] = 1
+    strong = q.copy()
+    strong[1] = 0.2
+    weak = np.zeros(16, np.float32)
+    weak[0], weak[2] = 0.15, 1.0   # small overlap with the query
+    good = q.copy()
+    good[3] = 0.6                  # decent match, no edges
+    hanger = np.zeros(16, np.float32)
+    hanger[5] = 1.0                # unrelated, linked only to the weak record
+    noise = np.random.default_rng(3).normal(size=(30, 16))
+    noise[:, 0] = -np.abs(noise[:, 0])
+    col.upsert(["strong", "weak", "good", "hanger"] + ids(30, "z"),
+               np.vstack([strong, weak, good, hanger, noise]))
+    col.link([{"src": "weak", "dst": "hanger"}])
+    top = [h["id"] for h in col.search(q, 3, graph_boost=0.5)]
+    assert "hanger" not in top and "good" in top

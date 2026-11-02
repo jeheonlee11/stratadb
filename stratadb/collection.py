@@ -382,19 +382,30 @@ class Collection:
             return results
 
     def _graph_rerank(self, q, scored, alpha, pred):
-        """Spreading activation: each candidate passes its similarity to its
-        neighbours, weighted by edge weight. Final score blends the record's own
-        similarity with the activation it received."""
+        """Spreading activation over the edge graph.
+
+        Only candidates that stand out from the pool spread activation: a seed's
+        strength is how far its similarity sits above the pool mean, so a weak,
+        barely-related match can't promote its neighbours. Each seed splits its
+        strength across its edges by weight. Activation is scaled so a record
+        linked only to the strongest seed gets 1.0, and the final score blends
+        the record's own similarity with the activation it received.
+        """
         sims = {rid: s for s, _, rid in scored}
         dists = {rid: d for _, d, rid in scored}
+        background = sum(sims.values()) / len(sims)
+        strength = {rid: max(sim - background, 0.0) for rid, sim in sims.items()}
+        top_strength = max(strength.values(), default=0.0) or 1.0
         activation: dict[str, float] = {}
-        for rid, sim in list(sims.items()):
+        for rid, s in strength.items():
+            if s <= 0:
+                continue
             nbrs = self.graph.weighted_neighbors(rid)
             if not nbrs:
                 continue
             total_w = sum(abs(w) for _, w in nbrs) or 1.0
             for nbr, w in nbrs:
-                activation[nbr] = activation.get(nbr, 0.0) + max(sim, 0.0) * abs(w) / total_w
+                activation[nbr] = activation.get(nbr, 0.0) + s * abs(w) / total_w
 
         # Pull in linked records that vector search missed (if they pass the filter).
         for nbr in activation:
@@ -406,10 +417,9 @@ class Collection:
             d = float(distances(q, found[0].reshape(1, -1), self.config.metric)[0])
             sims[nbr], dists[nbr] = similarity(d, self.config.metric), d
 
-        peak = max((activation.get(r, 0.0) for r in sims), default=0.0) or 1.0
         reranked = []
         for rid, sim in sims.items():
-            act = activation.get(rid, 0.0) / peak
+            act = min(activation.get(rid, 0.0) / top_strength, 1.0)
             reranked.append(((1 - alpha) * sim + alpha * act, dists[rid], rid, sim, act))
         reranked.sort(key=lambda t: -t[0])
         return reranked
