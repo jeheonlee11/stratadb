@@ -12,7 +12,7 @@ engine, HTTP server and client. The only dependency is numpy.
 from stratadb import Database
 
 db = Database("./data")
-kb = db.create_collection("kb", dim=384)
+kb = db.create_collection("kb", dim=384, text_field="text")
 
 kb.upsert(ids, vectors, metadata)                         # durable once it returns
 kb.link([{"src": "ana", "dst": "voltcell", "rel": "works_at"}])
@@ -21,6 +21,7 @@ kb.search(q, k=5)                                         # nearest neighbours
 kb.search(q, k=5, filter={"year": {"$gte": 2020}})        # with metadata filters
 kb.search(q, k=5, expand_hops=1)                          # attach each hit's neighbourhood
 kb.search(q, k=5, graph_boost=0.4)                        # re-rank by spreading activation over edges
+kb.search(q, text="E1042 checksum", k=5)                  # hybrid: vector + BM25 keyword, fused
 ```
 
 ## Why graph-native
@@ -75,8 +76,13 @@ activation, so a weak, barely related match can't promote its neighbours.
   HNSW with the filter applied during the walk.
 - **Metadata filters**: `$eq $ne $gt $gte $lt $lte $in $nin $contains $prefix
   $exists`, dotted paths, `$and $or $not`.
-- **Graph layer**: typed, weighted edges with properties, N-hop neighbours,
-  `expand_hops` and `graph_boost` in search, cascade on delete.
+- **Graph layer**: typed, weighted edges with properties, node properties,
+  N-hop neighbours, `expand_hops` and `graph_boost` in search, cascade on
+  delete. Graph-only collections (`dim=0`) hold a knowledge graph with no
+  vectors at all.
+- **Hybrid search**: a BM25 keyword index over one metadata field, fused with
+  vector results by reciprocal rank fusion. Catches exact tokens (error codes,
+  function names, part numbers) that embeddings blur.
 - **Server + client**: standard-library JSON/HTTP server with optional
   bearer-token auth; a client with the same method names as the embedded API.
 
@@ -101,6 +107,18 @@ with Database("./data") as db:
     hits = papers.search(np.random.rand(64), k=5, filter={"year": {"$gte": 2022}}, expand_hops=1)
     papers.neighbors("p2", hops=2, rel="cites", hydrate=True)
     papers.delete(["p1"])                                       # also removes p1's edges
+
+    # Hybrid search: index a metadata field for BM25 keyword matching
+    docs = db.create_collection("docs", dim=64, text_field="text")
+    docs.upsert(["d1"], np.random.rand(1, 64), [{"text": "Error E1042: WAL checksum failed"}])
+    docs.search(text="E1042", k=5)                             # keyword only
+    docs.search(np.random.rand(64), text="checksum", k=5)      # fused with the vector ranking
+
+    # A knowledge graph with no vectors: nodes with properties, typed edges
+    kg = db.create_graph("kg")
+    kg.put_nodes([{"id": "Ada", "props": {"type": "person"}}, {"id": "Engine", "props": {"type": "machine"}}])
+    kg.link([{"src": "Ada", "dst": "Engine", "rel": "wrote_about"}])
+    kg.neighbors("Ada", hydrate=True)
 ```
 
 ## Run it as a server
@@ -124,9 +142,10 @@ notes.search(query, k=5, graph_boost=0.3)
 | GET / POST | `/collections` | `{name, dim, metric?, ...options}` |
 | GET / DELETE | `/collections/<name>` | |
 | POST | `/collections/<name>/upsert` | `{ids, vectors, metadata?}` |
-| POST | `/collections/<name>/search` | `{vector, k?, filter?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
+| POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
 | POST | `/collections/<name>/get` · `delete` · `scan` | `{ids}` / `{ids}` / `{filter?, limit?}` |
 | POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
+| POST | `/collections/<name>/nodes` · `get_nodes` | `{nodes: [{id, props}]}` / `{ids}` |
 | POST | `/collections/<name>/checkpoint` · `compact` | |
 
 Maintenance from the shell: `stratadb stats|compact|checkpoint --path ./data [collection]`.
@@ -146,10 +165,44 @@ Set per collection at creation (`create_collection(name, dim, **options)`):
 | `sync` | `flush` | WAL durability: `always` (fsync), `flush`, `never` |
 | `wal_checkpoint_bytes` | 64 MB | checkpoint when the WAL grows past this |
 | `compact_deleted_ratio` | 0.3 | tombstone ratio that makes a segment a compaction candidate |
+| `text_field` | none | metadata field to index for keyword / hybrid search |
 
 ## Benchmarks
 
-BENCHMARKS_PLACEHOLDER
+All numbers: Apple Silicon laptop, Python 3.11, single process.
+
+**Real text embeddings.** 20,000 paragraphs of Python docstrings embedded
+with `BAAI/bge-small-en-v1.5` (384 dims), 200 held-out paragraphs as
+queries, recall against exact cosine top-10
+([`bench/real_embeddings.py`](bench/real_embeddings.py)):
+
+| search | recall@10 | p50 | p95 |
+|---|---|---|---|
+| HNSW, ef=32 | 0.978 | 0.48 ms | 0.77 ms |
+| HNSW, ef=64 | 0.990 | 0.78 ms | 1.15 ms |
+| HNSW, ef=128 | **0.999** | 1.53 ms | 2.10 ms |
+| exact scan (planner's small-segment path) | 1.000 | 6.8 ms | 8.6 ms |
+
+- Writes are acknowledged at about **260,000 vectors/s** (WAL append + growing
+  segment); the HNSW index for those 20k vectors is ready about 40 s later,
+  built in the background.
+- On disk: 33 MB for 20k x 384 vectors with index. Reopening takes under 0.1 s.
+
+**Index quality vs. a reference implementation.** Same vectors and
+parameters (`M=16, ef_construction=128`, 20k x 384) through StrataDB's HNSW
+and [hnswlib](https://github.com/nmslib/hnswlib) (C++):
+
+| data | ef | StrataDB recall@10 | hnswlib recall@10 |
+|---|---|---|---|
+| embedding-like (low intrinsic dimension) | 64 | 0.959 | 0.950 |
+| embedding-like | 128 | 0.993 | 0.991 |
+| hard: isotropic noise inside clusters | 128 | 0.687 | 0.707 |
+
+Recall matches within about a point. Builds are about 25-40x slower than
+hnswlib, the cost of pure Python, which is why they run in the background.
+
+Reproduce the synthetic runs with `python bench/ann_bench.py --data manifold`
+(or `--data clustered`).
 
 ## How it works
 
@@ -163,16 +216,20 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 67 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 86 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
-background index build, concurrent writers, compaction, the graph layer and
-the HTTP API.
+background index build, concurrent writers, compaction, hybrid search, the
+graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random
+operation histories, the WAL cut at random byte offsets, and a check that
+the reopened collection equals the state after some prefix of the
+operations. (It found a real bug: batches that crossed the seal threshold
+weren't atomic.)
 
 ## Limits
 
 - One process per collection directory (enforced with a lock file).
 - Each collection is held in memory.
-- Index builds are pure Python, roughly 1,000 vectors/second at 384 dims
+- Index builds are pure Python, roughly 500-1,000 vectors/second at 384 dims
   (in the background, so they don't block writes).
 
 ## License
