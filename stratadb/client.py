@@ -149,6 +149,11 @@ class RemoteCollection:
             raise StrataError(e.code, e.reason) from None
         return n
 
+    def tune_ef(self, target_recall: float = 0.95, k: int = 10, samples: int = 50, apply: bool = False,
+                queries=None) -> dict:
+        return self._post("tune_ef", {"target_recall": target_recall, "k": k, "samples": samples, "apply": apply,
+                                      "queries": None if queries is None else _jsonable(queries)})
+
     def merge(self, max_segments: int = 1) -> dict:
         return self._post("merge", {"max_segments": max_segments})
 

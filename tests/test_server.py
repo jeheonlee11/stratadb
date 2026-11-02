@@ -139,3 +139,12 @@ def test_fields_projection_over_http(server):
     assert col.search(np.eye(4)[0], k=1, fields=["k"])[0]["metadata"] == {"k": 1}
     assert col.get(["a"], fields=["k"])[0]["metadata"] == {"k": 1}
     assert col.scan(fields=["k"])[0]["metadata"] == {"k": 1}
+
+
+def test_tune_ef_endpoint(server):
+    client = Client(server, api_key="secret")
+    col = client.create_collection("t", dim=8, seal_threshold=200, background_seal=False, build_processes=0,
+                                   exact_search_limit=0)
+    col.upsert([f"r{i}" for i in range(200)], np.random.default_rng(3).normal(size=(200, 8)))
+    res = col.tune_ef(target_recall=0.8, samples=10)
+    assert res["recall"] >= 0.8 and res["samples"] == 10

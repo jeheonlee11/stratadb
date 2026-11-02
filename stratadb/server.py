@@ -29,6 +29,7 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/checkpoint
     POST   /collections/<name>/compact
     POST   /collections/<name>/merge       {max_segments?}
+    POST   /collections/<name>/tune_ef     {target_recall?, k?, samples?, apply?}
     GET    /collections/<name>/export      streams JSON lines (see Collection.export_jsonl)
 
 With ``api_key`` set, every request except ``/health`` needs
@@ -137,6 +138,7 @@ class Api:
                 "checkpoint": lambda: {"lsn": col.checkpoint()},
                 "compact": lambda: col.compact(),
                 "merge": lambda: col.merge(int(body.get("max_segments", 1))),
+                "tune_ef": lambda: col.tune_ef(**_pick(body, "target_recall", "k", "samples", "seed", "apply", "queries")),
             }.get(action)
             if handler is not None:
                 return handler()

@@ -1088,6 +1088,89 @@ class Collection:
         flush()
         return counts
 
+    def tune_ef(self, target_recall: float = 0.95, k: int = 10, samples: int = 50,
+                seed: int = 0, apply: bool = False, queries=None) -> dict:
+        """Find the smallest ``ef`` whose recall@k reaches ``target_recall``.
+
+        Pass ``queries`` (vectors from your real workload) for an exact answer.
+        Without them, queries are synthesized by pushing sampled stored vectors
+        away from the data to about 2.5x the typical nearest-neighbour distance;
+        a stored vector used as-is would be far too easy (it is already linked
+        to its neighbours in the graph). Synthetic queries are still slightly
+        easier than real ones at very small ef, so for targets below ~0.9 the
+        result can be a little optimistic. Ground truth is exact search; ef is
+        binary-searched in [k, 1024]. With
+        ``apply=True`` the result becomes this collection's ``ef_search``
+        (in memory; pass it to the config to persist). Returns the chosen ef,
+        the recall it achieved, and the table of (ef, recall) points tried.
+        """
+        self._require_vectors()
+        if not 0 < target_recall <= 1:
+            raise ValueError("target_recall must be in (0, 1]")
+        with self._lock:
+            self._check_open()
+            segments = [self.growing, *self.frozen.values(), *self.sealed.values()]
+            rows = [(rid, vec) for seg in segments for rid, vec, _ in seg.records()]
+        if len(rows) <= k:
+            return {"ef": self.config.ef_search, "recall": 1.0, "tried": [], "samples": 0}
+        rng = np.random.default_rng(seed)
+        ids = np.array([rid for rid, _ in rows])
+        matrix = np.stack([vec for _, vec in rows])
+        if queries is not None:
+            queries = prepare(np.asarray(queries, dtype=np.float32).reshape(-1, self.config.dim), self.config.metric)
+        else:
+            picks = rng.choice(len(rows), size=min(samples, len(rows)), replace=False)
+            nn = []
+            for i in picks:
+                d = distances(matrix[i], matrix, self.config.metric)
+                d[i] = np.inf
+                nn.append(float(d.min()))
+            step = 2.5 * float(np.median(nn))
+            if self.config.metric != "l2":
+                step = np.sqrt(2 * step)  # cosine/ip distance -> chord length on the unit sphere
+            else:
+                step = np.sqrt(step)      # squared L2 -> L2
+            synth = []
+            for i in picks:
+                direction = rng.normal(size=self.config.dim)
+                direction /= np.linalg.norm(direction) or 1.0
+                synth.append(matrix[i] + direction * step)
+            queries = prepare(np.stack(synth), self.config.metric)
+        exact = []
+        for q in queries:
+            d = distances(q, matrix, self.config.metric)
+            exact.append(set(ids[np.argpartition(d, k)[:k]].tolist()))
+
+        def recall_at(ef: int) -> float:
+            hits = 0
+            for q, truth in zip(queries, exact):
+                got = {h["id"] for h in self.search(q, k, ef=ef)}
+                hits += len(got & truth)
+            return hits / (k * len(queries))
+
+        lo, hi = k, 1024
+        tried = []
+        best = None
+        r = recall_at(hi)
+        tried.append((hi, r))
+        if r < target_recall:
+            best = (hi, r)   # even the widest beam misses the target; report it
+        else:
+            best = (hi, r)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                r = recall_at(mid)
+                tried.append((mid, r))
+                if r >= target_recall:
+                    best, hi = (mid, r), mid
+                else:
+                    lo = mid + 1
+        result = {"ef": best[0], "recall": round(best[1], 4),
+                  "tried": sorted(tried), "samples": len(queries), "k": k}
+        if apply:
+            self.config.ef_search = best[0]
+        return result
+
     def backup(self, dest: str | Path) -> Path:
         """Write a consistent copy of this collection to ``dest`` (a new directory).
 

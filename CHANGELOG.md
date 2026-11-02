@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `tune_ef(target_recall, queries=None)`: binary-searches the smallest `ef`
+  that meets a recall target against exact search, using your own query
+  vectors or synthetic ones pushed away from the stored data (a stored vector
+  used as-is is far too easy a query).
 - `fields=[...]` on `search`, `get` and `scan` returns only those metadata
   keys (dotted paths allowed); embedded, HTTP and client.
 

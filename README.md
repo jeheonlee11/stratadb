@@ -24,6 +24,7 @@ kb.search(q, k=5, graph_boost=0.4)                        # re-rank by spreading
 kb.search(q, text="E1042 checksum", k=5)                  # hybrid: vector + BM25 keyword, fused
 kb.search_many(queries, k=5)                               # many queries, one call
 kb.search(q, k=5, fields=["title", "meta.page"])           # return only those metadata keys
+kb.tune_ef(target_recall=0.95, apply=True)                 # pick the smallest ef that hits the target
 ```
 
 ## Why graph-native
@@ -177,6 +178,7 @@ notes.search(query, k=5, graph_boost=0.3)
 | POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
 | POST | `/collections/<name>/path` · `pagerank` · `components` | `{src, dst, max_hops?}` / `{top?, seeds?}` / |
 | POST | `/collections/<name>/checkpoint` · `compact` · `merge` | / / `{max_segments?}` |
+| POST | `/collections/<name>/tune_ef` | `{target_recall?, k?, samples?, apply?}` |
 | GET | `/collections/<name>/export` | streams the collection as JSON lines |
 
 Open `http://127.0.0.1:7700/` for the **web console**: browse collections and their stats,
@@ -196,7 +198,7 @@ Set per collection at creation (`create_collection(name, dim, **options)`):
 |---|---|---|
 | `metric` | `cosine` | `cosine`, `ip` or `l2` |
 | `m` / `ef_construction` | 16 / 128 | HNSW graph degree and build-time beam width |
-| `ef_search` | 64 | default query beam width (override per query with `ef=`) |
+| `ef_search` | 64 | default query beam width (override per query with `ef=`; `tune_ef` picks it for a recall target: on 20k real embeddings, 0.95 → ef 24, 0.99 → ef 67, in about a second) |
 | `seal_threshold` | 16384 | growing-segment size that triggers a seal |
 | `background_seal` | `True` | build indexes in the background instead of blocking the write |
 | `build_processes` | 2 | worker processes for index builds (and how many build at once); 0 = in-process |
@@ -299,7 +301,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 134 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 136 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random
