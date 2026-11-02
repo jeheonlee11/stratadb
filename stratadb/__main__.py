@@ -35,12 +35,40 @@ def main(argv=None) -> None:
     p.add_argument("--path", default="./data")
     p.add_argument("--out", required=True, help="destination directory (must not exist)")
 
+    p = sub.add_parser("export", help="write a collection as JSON lines")
+    p.add_argument("--path", default="./data")
+    p.add_argument("collection")
+    p.add_argument("--out", required=True, help="output .jsonl file")
+
+    p = sub.add_parser("import", help="load JSON lines into a collection (created if missing)")
+    p.add_argument("--path", default="./data")
+    p.add_argument("collection")
+    p.add_argument("--in", dest="infile", required=True, help="input .jsonl file")
+
     args = parser.parse_args(argv)
     if args.cmd == "serve":
         logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                             format="%(asctime)s %(levelname)s %(message)s")
         from .server import serve
         serve(args.path, args.host, args.port, args.api_key)
+        return
+
+    if args.cmd == "export":
+        with Database(args.path) as db, open(args.out, "w", encoding="utf-8") as fp:
+            counts = db[args.collection].export_jsonl(fp)
+        print(json.dumps({"exported": counts, "to": args.out}, indent=2))
+        return
+
+    if args.cmd == "import":
+        with open(args.infile, encoding="utf-8") as fp:
+            header = json.loads(fp.readline())
+            if header.get("type") != "collection":
+                raise SystemExit("import file must start with a collection header line")
+            fp.seek(0)
+            with Database(args.path) as db:
+                col = db.create_collection(args.collection, dim=int(header["dim"]), metric=header["metric"])
+                counts = col.import_jsonl(fp)
+        print(json.dumps({"imported": counts, "into": args.collection}, indent=2))
         return
 
     if args.cmd == "backup":

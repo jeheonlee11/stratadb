@@ -98,7 +98,9 @@ activation, so a weak, barely related match can't promote its neighbours.
   optional bearer-token auth, a client with the same method names as the
   embedded API, and a built-in web console (collections, filtered scans,
   keyword search, "more like this", graph explorer).
-- **Online backups**: a point-in-time copy of a live database.
+- **Online backups**: a point-in-time copy of a live database. **JSONL
+  export/import** of records, nodes and edges for moving data between
+  versions or tools.
 
 ## Install
 
@@ -178,7 +180,8 @@ own vector, so no embedding model is needed), explore the graph around a node, a
 nodes by PageRank or list connected components.
 
 Maintenance from the shell: `stratadb stats|compact|checkpoint --path ./data [collection]`, and
-`stratadb backup --path ./data --out ./backup` for a consistent online copy.
+`stratadb backup --path ./data --out ./backup` for a consistent online copy, and
+`stratadb export|import --path ./data <collection> --out|--in file.jsonl` for portable dumps.
 
 ## Configuration
 
@@ -287,7 +290,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 124 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 128 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

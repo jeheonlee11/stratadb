@@ -935,6 +935,76 @@ class Collection:
                         (self.path / name).unlink(missing_ok=True)
             return lsn
 
+    def export_jsonl(self, fp, batch: int = 1000) -> dict:
+        """Write every record, node and edge as one JSON object per line.
+
+        Lines are ``{"type": "record", "id", "vector", "metadata"}``,
+        ``{"type": "node", "id", "props"}`` and ``{"type": "edge", "src", "dst",
+        "rel", "weight", "props"}``, preceded by a ``{"type": "collection", ...}``
+        header with dim and metric. Vectors are written as stored (unit length
+        for cosine collections). Version-independent, unlike ``backup``.
+        """
+        counts = {"records": 0, "nodes": 0, "edges": 0}
+        with self._lock:
+            self._check_open()
+            fp.write(json.dumps({"type": "collection", "name": self.name, "dim": self.config.dim,
+                                 "metric": self.config.metric}) + "\n")
+            segments = [self.growing, *self.frozen.values(), *self.sealed.values()]
+            for seg in segments:
+                for rid, vec, meta in seg.records():
+                    fp.write(json.dumps({"type": "record", "id": rid, "vector": [float(x) for x in vec],
+                                         "metadata": meta}, ensure_ascii=False) + "\n")
+                    counts["records"] += 1
+            for nid in self.graph.node_ids():
+                fp.write(json.dumps({"type": "node", "id": nid, "props": self.graph.get_node(nid)},
+                                    ensure_ascii=False) + "\n")
+                counts["nodes"] += 1
+            for src, rel, dst, w, props in self.graph.all_edges():
+                fp.write(json.dumps({"type": "edge", "src": src, "dst": dst, "rel": rel, "weight": w,
+                                     "props": props}, ensure_ascii=False) + "\n")
+                counts["edges"] += 1
+        return counts
+
+    def import_jsonl(self, fp, batch: int = 1000) -> dict:
+        """Load lines written by ``export_jsonl`` (upserting; existing ids are
+        overwritten). The header's dim and metric must match this collection."""
+        counts = {"records": 0, "nodes": 0, "edges": 0}
+        ids, vecs, metas, nodes, edges = [], [], [], [], []
+
+        def flush():
+            if ids:
+                self.upsert(list(ids), np.asarray(vecs, dtype=np.float32), list(metas))
+                ids.clear(); vecs.clear(); metas.clear()
+            if nodes:
+                self.put_nodes(list(nodes)); nodes.clear()
+            if edges:
+                self.link(list(edges)); edges.clear()
+
+        for line in fp:
+            line = line.strip()
+            if not line:
+                continue
+            obj = json.loads(line)
+            kind = obj.get("type")
+            if kind == "collection":
+                if obj.get("dim") != self.config.dim or obj.get("metric") != self.config.metric:
+                    raise ValueError(f"export is dim={obj.get('dim')} metric={obj.get('metric')!r}; "
+                                     f"this collection is dim={self.config.dim} metric={self.config.metric!r}")
+            elif kind == "record":
+                ids.append(obj["id"]); vecs.append(obj["vector"]); metas.append(obj.get("metadata") or {})
+                counts["records"] += 1
+            elif kind == "node":
+                nodes.append({"id": obj["id"], "props": obj.get("props") or {}}); counts["nodes"] += 1
+            elif kind == "edge":
+                edges.append({k: obj[k] for k in ("src", "dst", "rel", "weight", "props") if k in obj})
+                counts["edges"] += 1
+            else:
+                raise ValueError(f"unknown line type {kind!r}")
+            if len(ids) >= batch or len(nodes) >= batch or len(edges) >= batch:
+                flush()
+        flush()
+        return counts
+
     def backup(self, dest: str | Path) -> Path:
         """Write a consistent copy of this collection to ``dest`` (a new directory).
 
@@ -996,5 +1066,7 @@ class Collection:
             self._closed = True
             self._dir_lock.release()
         if self._pool is not None:
-            self._pool.shutdown(wait=False)
+            # Wait for the idle workers to exit: with wait=False they outlive
+            # this process briefly and keep inherited pipes open.
+            self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
