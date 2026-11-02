@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Console: Maintenance tab (checkpoint, compact, merge, tune ef).
+
 ## 0.6.0
 
 - `neighbors(filter=...)` keeps only neighbours whose metadata or node

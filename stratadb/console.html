@@ -116,7 +116,7 @@ async function loadCollections() {
   }
 }
 
-async function select(name) {
+async function select(name, refreshOnly) {
   current = name;
   document.querySelectorAll(".col").forEach(el => el.classList.toggle("active", el.dataset.name === name));
   const content = $("#content");
@@ -125,16 +125,18 @@ async function select(name) {
   } catch (e) { content.innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
   const s = currentStats;
   const segs = s.sealed_segments || [];
+  if (refreshOnly && $("#panel")) {
+    // Only refresh the numbers; keep the open panel (and its output) as is.
+    const card = content.querySelector(".stats");
+    if (card) card.outerHTML = statsHtml(s, segs);
+    loadCollections();
+    return;
+  }
   content.innerHTML = `
     <div class="card">
       <div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(s.name)}</h2>
         <button class="ghost" id="export">Export JSONL</button></div>
-      <div class="stats">
-        ${stat(s.count.toLocaleString(), "records")}${stat(s.dim === 0 ? "graph" : s.dim, "dimensions")}
-        ${stat(s.dim === 0 ? "n/a" : s.metric, "metric")}${stat(segs.length, "sealed segments")}${stat(s.growing + (s.sealing || 0), "growing / sealing")}
-        ${stat((s.edges || 0).toLocaleString(), "edges")}${stat((s.nodes || 0).toLocaleString(), "nodes")}
-        ${stat(fmtBytes(s.wal_bytes), "WAL")}
-      </div>
+      ${statsHtml(s, segs)}
     </div>
     <div class="card">
       <div class="tabs">
@@ -142,6 +144,7 @@ async function select(name) {
         <div class="tab" data-tab="keyword">Keyword search</div>
         <div class="tab" data-tab="similar">More like this</div>
         <div class="tab" data-tab="graph">Graph</div>
+        <div class="tab" data-tab="maint">Maintenance</div>
       </div>
       <div id="panel"></div>
     </div>`;
@@ -170,6 +173,12 @@ async function select(name) {
   showTab(activeTab);
 }
 
+const statsHtml = (s, segs) => `<div class="stats">
+        ${stat(s.count.toLocaleString(), "records")}${stat(s.dim === 0 ? "graph" : s.dim, "dimensions")}
+        ${stat(s.dim === 0 ? "n/a" : s.metric, "metric")}${stat(segs.length, "sealed segments")}${stat(s.growing + (s.sealing || 0), "growing / sealing")}
+        ${stat((s.edges || 0).toLocaleString(), "edges")}${stat((s.nodes || 0).toLocaleString(), "nodes")}
+        ${stat(fmtBytes(s.wal_bytes), "WAL")}
+      </div>`;
 const stat = (v, label) => `<div class="stat"><b>${esc(v)}</b><span>${label}</span></div>`;
 const truncate = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
 const fmtBytes = b => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB";
@@ -240,6 +249,31 @@ function showTab(tab) {
         <button id="run">Find similar</button></div>
       <div id="out" style="margin-top:10px"></div>`;
     $("#run").onclick = () => similar($("#rid").value.trim());
+  } else if (tab === "maint") {
+    const vec = currentStats && currentStats.dim > 0;
+    panel.innerHTML = `
+      <p class="muted" style="margin-top:0">Each action runs on the server and reports its result here.</p>
+      <div class="row">
+        <button class="ghost" data-act="checkpoint">Checkpoint</button>
+        <button class="ghost" data-act="compact">Compact</button>
+        ${vec ? `<button class="ghost" data-act="merge">Merge to <input id="mergeN" type="number" value="1" min="1" style="width:60px"> segment(s)</button>
+        <button class="ghost" data-act="tune">Tune ef for recall <input id="target" type="number" value="0.95" min="0.5" max="1" step="0.01" style="width:70px"></button>` : ""}
+      </div>
+      <pre id="out" class="meta" style="margin-top:12px;font-family:var(--mono);font-size:12px;white-space:pre-wrap"></pre>`;
+    panel.querySelectorAll("button[data-act]").forEach(b => b.addEventListener("click", async e => {
+      if (e.target.tagName === "INPUT") return;
+      const out = $("#out");
+      const act = b.dataset.act;
+      out.textContent = "Running " + act + "…";
+      try {
+        let res;
+        if (act === "merge") res = await api("POST", `/collections/${encodeURIComponent(current)}/merge`, {max_segments: +$("#mergeN").value});
+        else if (act === "tune") res = await api("POST", `/collections/${encodeURIComponent(current)}/tune_ef`, {target_recall: +$("#target").value, apply: true});
+        else res = await api("POST", `/collections/${encodeURIComponent(current)}/${act}`, {});
+        out.textContent = JSON.stringify(res, null, 2);
+        select(current, true);
+      } catch (err) { out.innerHTML = `<span class="err">${esc(err.message)}</span>`; }
+    }));
   } else if (tab === "graph") {
     panel.innerHTML = `
       <div class="row"><input id="node" placeholder="node or record id" style="flex:1;min-width:160px">
