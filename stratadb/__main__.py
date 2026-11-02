@@ -26,6 +26,7 @@ def main(argv=None) -> None:
 
     for name, help_text in (("stats", "print collection stats"),
                             ("compact", "compact segments"),
+                            ("merge", "merge all sealed segments into one"),
                             ("checkpoint", "write a checkpoint and empty the WAL")):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--path", default="./data")
@@ -84,6 +85,8 @@ def main(argv=None) -> None:
             col = db[name]
             if args.cmd == "compact":
                 out[name] = col.compact()
+            elif args.cmd == "merge":
+                out[name] = col.merge(1)
             elif args.cmd == "checkpoint":
                 out[name] = {"lsn": col.checkpoint()}
             else:

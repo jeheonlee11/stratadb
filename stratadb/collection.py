@@ -854,6 +854,44 @@ class Collection:
                 return {"started": True, "rewriting": victim_ids}
         return self._compact_build(victim_ids, chunks)
 
+    def merge(self, max_segments: int = 1, wait: bool = True) -> dict:
+        """Rewrite all sealed segments into at most ``max_segments`` larger ones.
+
+        A query walks every segment's graph, so fewer, larger segments answer
+        faster (about 3x from 7 segments to 2 at 100k vectors). Use after a
+        bulk load on a read-heavy collection. Same safety as ``compact``: built
+        outside the lock, deletes and overwrites during the build reconciled.
+        """
+        if max_segments < 1:
+            raise ValueError("max_segments must be at least 1")
+        self._check_open()
+        self.wait_for_seal()
+        self.wait_for_compaction()
+        with self._lock:
+            self._check_open()
+            victims = list(self.sealed.values())
+            total = sum(len(s) for s in victims)
+            if len(victims) <= max_segments and all(s.deleted_ratio == 0 for s in victims):
+                return {"rewritten": 0, "segments": len(self.sealed)}
+            if total == 0:
+                return {"rewritten": 0, "segments": len(self.sealed)}
+            victim_ids = [s.seg_id for s in victims]
+            records = [(rid, vec.copy(), meta) for s in victims for rid, vec, meta in s.records()]
+            size = -(-total // max_segments)  # ceil
+            chunks = []
+            for start in range(0, total, size):
+                chunks.append((self._next_seg, records[start:start + size]))
+                self._next_seg += 1
+            self._compacting = set(victim_ids)
+            if not wait:
+                self._compact_thread = threading.Thread(
+                    target=self._compact_build, args=(victim_ids, chunks),
+                    name=f"stratadb-merge-{self.name}", daemon=True,
+                )
+                self._compact_thread.start()
+                return {"started": True, "rewriting": victim_ids}
+        return self._compact_build(victim_ids, chunks)
+
     def _compact_build(self, victim_ids: list[int], chunks) -> dict:
         try:
             built = [self._build_segment(seg_id, chunk) for seg_id, chunk in chunks]

@@ -134,6 +134,9 @@ class RemoteCollection:
     def checkpoint(self) -> int:
         return self._post("checkpoint")["lsn"]
 
+    def merge(self, max_segments: int = 1) -> dict:
+        return self._post("merge", {"max_segments": max_segments})
+
     def compact(self) -> dict:
         return self._post("compact")
 

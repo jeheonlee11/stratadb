@@ -28,6 +28,7 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/components
     POST   /collections/<name>/checkpoint
     POST   /collections/<name>/compact
+    POST   /collections/<name>/merge       {max_segments?}
 
 With ``api_key`` set, every request except ``/health`` needs
 ``Authorization: Bearer <key>``.
@@ -133,6 +134,7 @@ class Api:
                 "components": lambda: {"components": col.components()},
                 "checkpoint": lambda: {"lsn": col.checkpoint()},
                 "compact": lambda: col.compact(),
+                "merge": lambda: col.merge(int(body.get("max_segments", 1))),
             }.get(action)
             if handler is not None:
                 return handler()

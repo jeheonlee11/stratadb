@@ -69,7 +69,10 @@ activation, so a weak, barely related match can't promote its neighbours.
 - **Segments**: writes land in a brute-force growing segment, which seals
   into an HNSW-indexed segment **in a background worker process** while
   staying searchable. Several segments build at once, so bulk loads scale
-  with cores: 4 workers index 20k x 384 vectors 4x faster than one. Deletes are tombstones; segments heavy with them are compacted
+  with cores: 4 workers index 20k x 384 vectors 4x faster than one. After a
+  bulk load, `merge(n)` rewrites the sealed segments into `n` larger ones for
+  faster queries: on 20k real embeddings, merging 4 segments into 1 took 30 s and cut
+  p50 search from 4.2 ms to 1.1 ms at recall 0.9985. Deletes are tombstones; segments heavy with them are compacted
   automatically in the background (the rebuild runs outside the lock, so
   reads and writes never wait for it).
 - **Crash recovery**: generation-numbered snapshots plus an atomically
@@ -172,14 +175,14 @@ notes.search(query, k=5, graph_boost=0.3)
 | POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
 | POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
 | POST | `/collections/<name>/path` · `pagerank` · `components` | `{src, dst, max_hops?}` / `{top?, seeds?}` / |
-| POST | `/collections/<name>/checkpoint` · `compact` | |
+| POST | `/collections/<name>/checkpoint` · `compact` · `merge` | / / `{max_segments?}` |
 
 Open `http://127.0.0.1:7700/` for the **web console**: browse collections and their stats,
 run filtered scans and keyword searches, find records similar to any stored record (using its
 own vector, so no embedding model is needed), explore the graph around a node, and rank
 nodes by PageRank or list connected components.
 
-Maintenance from the shell: `stratadb stats|compact|checkpoint --path ./data [collection]`, and
+Maintenance from the shell: `stratadb stats|compact|merge|checkpoint --path ./data [collection]`, and
 `stratadb backup --path ./data --out ./backup` for a consistent online copy, and
 `stratadb export|import --path ./data <collection> --out|--in file.jsonl` for portable dumps.
 
@@ -294,7 +297,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 128 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 130 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

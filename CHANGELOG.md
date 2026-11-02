@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `merge(max_segments)` rewrites sealed segments into fewer, larger ones for
+  faster queries after a bulk load (`stratadb merge`, `POST .../merge`).
+
 ## 0.4.0
 
 - JSONL export/import (`export_jsonl` / `import_jsonl`, `stratadb export|import`).
