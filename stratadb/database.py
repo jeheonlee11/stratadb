@@ -68,6 +68,7 @@ class Database:
             col = self._collections.pop(name, None)
             if col is not None:
                 col.wait_for_seal()
+                col.wait_for_compaction()
                 col.wal.close()
                 col._closed = True
                 col._dir_lock.release()

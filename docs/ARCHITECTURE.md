@@ -68,7 +68,12 @@ swap time by tombstoning those ids in the new segment.
 Sealed segments are immutable. Deleting a record adds a tombstone; the graph
 still routes through tombstoned nodes but never returns them. `compact()`
 rewrites segments whose tombstone ratio passes `compact_deleted_ratio` and
-merges undersized ones.
+merges undersized ones. It works like sealing: the live records are
+snapshotted under the lock, the replacement segments are built outside it,
+and at install time every record whose locator no longer points at a
+rewritten segment (deleted or overwritten during the build) is tombstoned in
+the new one. With `auto_compact` (default) a delete or overwrite that pushes a
+segment past the ratio starts this on a worker thread.
 
 ## Search
 

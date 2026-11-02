@@ -67,7 +67,9 @@ activation, so a weak, barely related match can't promote its neighbours.
   torn or corrupt tails are detected and truncated on open.
 - **Segments**: writes land in a brute-force growing segment, which seals
   into an HNSW-indexed segment **on a background thread** while staying
-  searchable. Deletes are tombstones; `compact()` rewrites heavy segments.
+  searchable. Deletes are tombstones; segments heavy with them are compacted
+  automatically in the background (the rebuild runs outside the lock, so
+  reads and writes never wait for it).
 - **Crash recovery**: generation-numbered snapshots plus an atomically
   swapped manifest; opening a collection replays the WAL. Tested by
   reopening without `close()`, mid-build crashes and truncated logs.
@@ -184,6 +186,7 @@ Set per collection at creation (`create_collection(name, dim, **options)`):
 | `sync` | `flush` | WAL durability: `always` (fsync), `flush`, `never` |
 | `wal_checkpoint_bytes` | 64 MB | checkpoint when the WAL grows past this |
 | `compact_deleted_ratio` | 0.3 | tombstone ratio that makes a segment a compaction candidate |
+| `auto_compact` | `True` | compact in the background when a segment reaches that ratio |
 | `text_field` | none | metadata field to index for keyword / hybrid search |
 | `index_fields` | none | metadata fields (dotted paths allowed) with secondary indexes |
 
@@ -248,7 +251,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 113 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 115 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

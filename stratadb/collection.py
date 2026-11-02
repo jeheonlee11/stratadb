@@ -59,6 +59,9 @@ class CollectionConfig:
     # Segments with (live records x dim) at or below this are scanned exactly:
     # a single matrix product beats a Python graph walk at that size.
     exact_search_limit: int = 3_000_000
+    # Compact in the background when a sealed segment's tombstone ratio
+    # reaches compact_deleted_ratio.
+    auto_compact: bool = True
     # Metadata field to index for keyword (BM25) and hybrid search, e.g. "text".
     text_field: str | None = None
     # Metadata fields with secondary indexes (equality, $in, numeric ranges).
@@ -110,6 +113,8 @@ class Collection:
         self.frozen: GrowingSegment | None = None
         self._seal_thread: threading.Thread | None = None
         self._seal_error: Exception | None = None
+        self._compact_thread: threading.Thread | None = None
+        self._compacting: set[int] = set()
         self.text_index: BM25Index | None = BM25Index() if self.config.text_field else None
         self.meta_index: MetaIndex | None = MetaIndex(self.config.index_fields) if self.config.index_fields else None
         self._closed = False
@@ -285,6 +290,7 @@ class Collection:
             self.seal(only_if_full=True)
             with self._lock:
                 full = not self._closed and self._growing_full
+        self._maybe_auto_compact()  # overwrites tombstone sealed records too
         return len(ids)
 
     def delete(self, ids: Iterable[str]) -> int:
@@ -299,7 +305,8 @@ class Collection:
                 self.wal.append("delete", {"ids": targets})
                 self._apply("delete", {"ids": targets}, None)
                 self._maybe_checkpoint()
-            return len(present)
+        self._maybe_auto_compact()
+        return len(present)
 
     def link(self, edges: list[dict]) -> int:
         """Add edges: ``[{"src", "dst", "rel"?, "weight"?, "props"?}]``."""
@@ -671,9 +678,16 @@ class Collection:
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join()
 
-    def compact(self) -> dict:
-        """Rewrite sealed segments that are mostly tombstones, and merge small ones."""
-        self.wait_for_seal()
+    def compact(self, wait: bool = True) -> dict:
+        """Rewrite sealed segments that are mostly tombstones, and merge small ones.
+
+        The live records are snapshotted under the lock, the new segments are
+        built outside it (reads and writes keep going), and on install any
+        record deleted or overwritten during the build is tombstoned in the new
+        segment. With ``wait=False`` the build runs on a worker thread.
+        """
+        self._check_open()
+        self.wait_for_compaction()
         with self._lock:
             self._check_open()
             threshold = self.config.seal_threshold
@@ -683,26 +697,70 @@ class Collection:
             ]
             if not victims or (len(victims) == 1 and victims[0].deleted_ratio == 0):
                 return {"rewritten": 0, "segments": len(self.sealed)}
-            records = [r for s in victims for r in s.records()]
-            for s in victims:
-                del self.sealed[s.seg_id]
-            new_ids = []
+            victim_ids = [s.seg_id for s in victims]
+            records = [(rid, vec.copy(), meta) for s in victims for rid, vec, meta in s.records()]
+            chunks = []
             for start in range(0, len(records), threshold):
-                chunk = [(rid, vec.copy(), meta) for rid, vec, meta in records[start:start + threshold]]
-                seg_id = self._next_seg
+                chunks.append((self._next_seg, records[start:start + threshold]))
                 self._next_seg += 1
-                segment = SealedSegment.build(
-                    seg_id, self.path / f"seg-{seg_id}", chunk,
-                    self.config.metric, self.config.m, self.config.ef_construction,
+            self._compacting = set(victim_ids)
+            if not wait:
+                self._compact_thread = threading.Thread(
+                    target=self._compact_build, args=(victim_ids, chunks),
+                    name=f"stratadb-compact-{self.name}", daemon=True,
                 )
-                self.sealed[seg_id] = segment
-                for rid in segment.pos:
-                    self.locator[rid] = seg_id
-                new_ids.append(seg_id)
+                self._compact_thread.start()
+                return {"started": True, "rewriting": victim_ids}
+        return self._compact_build(victim_ids, chunks)
+
+    def _compact_build(self, victim_ids: list[int], chunks) -> dict:
+        try:
+            built = [
+                SealedSegment.build(seg_id, self.path / f"seg-{seg_id}", chunk,
+                                    self.config.metric, self.config.m, self.config.ef_construction)
+                for seg_id, chunk in chunks
+            ]
+        except Exception as e:  # noqa: BLE001 - old segments stay in place; nothing is lost
+            log.exception("compacting %s failed", self.name)
+            with self._lock:
+                self._compacting = set()
+            return {"rewritten": 0, "error": str(e)}
+        victim_set = set(victim_ids)
+        with self._lock:
+            if self._closed:
+                return {"rewritten": 0, "error": "closed"}
+            for segment in built:
+                for rid in list(segment.pos):
+                    if self.locator.get(rid) in victim_set:
+                        self.locator[rid] = segment.seg_id
+                    else:  # deleted or overwritten while the new segment was building
+                        segment.delete(rid)
+                self.sealed[segment.seg_id] = segment
+            victims = [self.sealed.pop(v) for v in victim_ids if v in self.sealed]
+            self._compacting = set()
             self.checkpoint()
-            for s in victims:
-                shutil.rmtree(s.path, ignore_errors=True)
-            return {"rewritten": len(victims), "new_segments": new_ids, "segments": len(self.sealed)}
+            result = {"rewritten": len(victims), "new_segments": [s.seg_id for s in built],
+                      "segments": len(self.sealed)}
+        for v in victims:
+            shutil.rmtree(v.path, ignore_errors=True)
+        return result
+
+    def wait_for_compaction(self) -> None:
+        thread = self._compact_thread
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
+
+    def _maybe_auto_compact(self) -> None:
+        if not self.config.auto_compact or self._closed:
+            return
+        thread = self._compact_thread
+        if thread is not None and thread.is_alive():
+            return
+        with self._lock:
+            due = any(s.deleted_ratio >= self.config.compact_deleted_ratio and len(s.ids) >= 64
+                      for s in self.sealed.values())
+        if due:
+            self.compact(wait=False)
 
     def checkpoint(self) -> int:
         with self._lock:
@@ -751,6 +809,7 @@ class Collection:
         if dest.exists():
             raise FileExistsError(f"{dest} already exists")
         self.wait_for_seal()
+        self.wait_for_compaction()
         with self._lock:
             self._check_open()
             self.checkpoint()
@@ -790,6 +849,7 @@ class Collection:
 
     def close(self) -> None:
         self.wait_for_seal()
+        self.wait_for_compaction()
         with self._lock:
             if self._closed:
                 return

@@ -134,3 +134,37 @@ def test_exact_planner_matches_hnsw_results(tmp_path):
     a = [h["id"] for h in exact.search(q, 10)]
     b = [h["id"] for h in graph.search(q, 10, ef=200)]
     assert len(set(a) & set(b)) >= 9
+
+
+def test_compaction_runs_outside_the_lock_and_reconciles(tmp_path, monkeypatch):
+    col = make(tmp_path, seal_threshold=100, background_seal=False, auto_compact=False)
+    data = rand(200)
+    col.upsert([f"r{i}" for i in range(200)], data)
+    col.delete([f"r{i}" for i in range(50)])          # segment 1 is now 50% tombstones
+    gate = SlowBuild(monkeypatch)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(col.compact()))
+    worker.start()
+    assert gate.started.wait(5)
+    # The build is parked: reads and writes must not block on it.
+    assert col.search(data[60], 1)[0]["id"] == "r60"
+    col.delete(["r70"])                                 # delete a record being rewritten
+    col.upsert(["r80"], rand(1, seed=9), [{"v": 2}])    # overwrite one
+    gate.release.set()
+    worker.join(10)
+    assert result["rewritten"] >= 1
+    assert "r70" not in col and col.get(["r80"])[0]["metadata"] == {"v": 2}
+    assert len(col) == 149
+    assert all(s["deleted_ratio"] < 0.3 for s in col.stats()["sealed_segments"])
+    col.close()
+    reopened = Collection(tmp_path / "c")
+    assert len(reopened) == 149 and "r70" not in reopened
+
+
+def test_auto_compaction_kicks_in(tmp_path):
+    col = make(tmp_path, seal_threshold=100, background_seal=False, auto_compact=True)
+    col.upsert([f"r{i}" for i in range(200)], rand(200))
+    col.delete([f"r{i}" for i in range(40)])
+    col.wait_for_compaction()
+    segs = col.stats()["sealed_segments"]
+    assert all(s["deleted_ratio"] == 0 for s in segs) and len(col) == 160

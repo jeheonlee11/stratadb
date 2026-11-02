@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Background auto-compaction**: segments past `compact_deleted_ratio` are
+  rewritten on a worker thread; compaction no longer holds the lock while
+  rebuilding, and reconciles deletes/overwrites made during the build.
 - **Graph algorithms**: `shortest_path`, `pagerank` (incl. personalized),
   `components`, over HTTP too. Checked against networkx.
 - **Secondary indexes** on metadata fields (`index_fields`): hash and

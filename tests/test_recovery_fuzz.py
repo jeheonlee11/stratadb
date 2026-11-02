@@ -85,6 +85,7 @@ def test_random_crashes_recover_a_consistent_prefix(tmp_path, seed):
             checkpoint_at = len(history) - 1
 
     assert state_of(col) == history[-1]
+    col.wait_for_compaction()  # don't copy the directory mid-checkpoint
 
     wal_size = (tmp_path / "c" / "wal.log").stat().st_size
     for trial in range(6):
