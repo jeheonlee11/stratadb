@@ -4,6 +4,7 @@ Endpoints, all JSON in and out::
 
     GET    /                               web console
     GET    /health
+    GET    /metrics                        Prometheus text format
     GET    /collections
     POST   /collections                    {name, dim, metric?, ...options}
     GET    /collections/<name>             stats
@@ -41,6 +42,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import time
 from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -73,11 +75,63 @@ COLLECTION_OPTIONS = ("m", "ef_construction", "ef_search", "seal_threshold", "sy
                       "wal_checkpoint_bytes", "compact_deleted_ratio", "background_seal", "exact_search_limit", "text_field", "index_fields", "auto_compact", "build_processes", "build_process_min_records")
 
 
+class Metrics:
+    """Request counters and latency sums, rendered in Prometheus text format."""
+
+    def __init__(self):
+        import threading
+
+        self._lock = threading.Lock()
+        self.requests: dict[tuple[str, str], int] = {}      # (action, status) -> count
+        self.seconds: dict[str, float] = {}                 # action -> total seconds
+        self.started = time.time()
+
+    def record(self, action: str, status: int, seconds: float) -> None:
+        with self._lock:
+            key = (action, str(status))
+            self.requests[key] = self.requests.get(key, 0) + 1
+            self.seconds[action] = self.seconds.get(action, 0.0) + seconds
+
+    def render(self, db: Database) -> str:
+        lines = ["# HELP stratadb_up 1 while the server runs.", "# TYPE stratadb_up gauge", "stratadb_up 1",
+                 "# HELP stratadb_uptime_seconds Seconds since the server started.",
+                 "# TYPE stratadb_uptime_seconds gauge", f"stratadb_uptime_seconds {time.time() - self.started:.0f}",
+                 "# HELP stratadb_requests_total Requests by action and HTTP status.",
+                 "# TYPE stratadb_requests_total counter"]
+        with self._lock:
+            for (action, status), n in sorted(self.requests.items()):
+                lines.append(f'stratadb_requests_total{{action="{action}",status="{status}"}} {n}')
+            lines += ["# HELP stratadb_request_seconds_total Time spent handling requests, by action.",
+                      "# TYPE stratadb_request_seconds_total counter"]
+            for action, secs in sorted(self.seconds.items()):
+                lines.append(f'stratadb_request_seconds_total{{action="{action}"}} {secs:.6f}')
+        gauges = [("records", "Live records", "count"), ("edges", "Edges", "edges"), ("nodes", "Nodes with properties", "nodes"),
+                  ("wal_bytes", "Bytes in the write-ahead log since the last checkpoint", "wal_bytes"),
+                  ("growing_records", "Records in the growing segment", "growing"),
+                  ("sealing_records", "Records in segments being indexed", "sealing")]
+        stats = []
+        for name in db.list_collections():
+            try:
+                stats.append(db.collection(name).stats())
+            except Exception:  # noqa: BLE001 - a broken collection must not break metrics
+                continue
+        for key, help_text, field in gauges:
+            lines += [f"# HELP stratadb_{key} {help_text}.", f"# TYPE stratadb_{key} gauge"]
+            for st in stats:
+                lines.append(f'stratadb_{key}{{collection="{st["name"]}"}} {st.get(field, 0)}')
+        lines += ["# HELP stratadb_sealed_segments Sealed segments per collection.",
+                  "# TYPE stratadb_sealed_segments gauge"]
+        for st in stats:
+            lines.append(f'stratadb_sealed_segments{{collection="{st["name"]}"}} {len(st["sealed_segments"])}')
+        return "\n".join(lines) + "\n"
+
+
 class Api:
     """Routes requests to a Database. Kept separate from HTTP so it's easy to test."""
 
     def __init__(self, db: Database):
         self.db = db
+        self.metrics = Metrics()
 
     def handle(self, method: str, path: str, body: dict) -> Any:
         parts = [p for p in path.split("?")[0].split("/") if p]
@@ -159,6 +213,7 @@ def make_handler(api: Api, api_key: str | None):
             log.info("%s - %s", self.address_string(), fmt % args)
 
         def _send(self, status: int, payload: Any) -> None:
+            self._last_status = status
             data = json.dumps(payload, ensure_ascii=False).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -201,6 +256,18 @@ def make_handler(api: Api, api_key: str | None):
                 self._send_console()  # the page is static; its API calls carry the key
                 return
             parts = [p for p in path.split("/") if p]
+            if method == "GET" and path == "/metrics":
+                if api_key and not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                                      f"Bearer {api_key}".encode()):
+                    self._send(401, {"error": "missing or wrong API key"})
+                    return
+                data = api.metrics.render(api.db).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if method == "GET" and len(parts) == 3 and parts[0] == "collections" and parts[2] == "export":
                 if api_key and not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
                                                       f"Bearer {api_key}".encode()):
@@ -208,6 +275,9 @@ def make_handler(api: Api, api_key: str | None):
                     return
                 self._send_export(parts[1])
                 return
+            action = parts[2] if len(parts) == 3 else (parts[0] if parts else "root")
+            started = time.perf_counter()
+            status = 500
             try:
                 if api_key and self.path.split("?")[0] != "/health":
                     supplied = self.headers.get("Authorization", "")
@@ -233,6 +303,8 @@ def make_handler(api: Api, api_key: str | None):
             except Exception as e:  # noqa: BLE001 - last-resort guard for the server loop
                 log.exception("unhandled error")
                 self._send(500, {"error": f"internal error: {type(e).__name__}"})
+            finally:
+                api.metrics.record(action, getattr(self, "_last_status", status), time.perf_counter() - started)
 
         def do_GET(self):
             self._dispatch("GET")

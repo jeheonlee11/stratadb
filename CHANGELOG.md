@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `GET /metrics` in Prometheus text format: per-collection gauges (records,
+  edges, nodes, WAL bytes, segments) and request/latency counters by action.
 - `stratadb serve` shuts down cleanly on SIGTERM as well as Ctrl-C: final
   checkpoint, nothing to replay on the next start.
 - Console: Maintenance tab (checkpoint, compact, merge, tune ef).

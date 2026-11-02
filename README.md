@@ -168,7 +168,7 @@ notes.search(query, k=5, graph_boost=0.3)
 
 | Method | Path | Body |
 |---|---|---|
-| GET | `/health` | |
+| GET | `/health` · `/metrics` | / Prometheus text format |
 | GET / POST | `/collections` | `{name, dim, metric?, ...options}` |
 | GET / DELETE | `/collections/<name>` | |
 | POST | `/collections/<name>/upsert` | `{ids, vectors, metadata?}` |
@@ -304,7 +304,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 138 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 139 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

@@ -182,3 +182,25 @@ def test_sigterm_closes_database_cleanly(tmp_path):
     reopened = Database(tmp_path / "db")["s"]
     assert len(reopened) == 2 and reopened.replayed_entries == 0   # checkpointed on shutdown
     reopened.close()
+
+
+def test_metrics_endpoint(server):
+    import urllib.request
+
+    client = Client(server, api_key="secret")
+    col = client.create_collection("mx", dim=4)
+    col.upsert(["a"], np.eye(4)[:1])
+    col.search(np.eye(4)[0], k=1)
+    with pytest.raises(StrataError):
+        client.collection("missing")
+    req = urllib.request.Request(server + "/metrics", headers={"Authorization": "Bearer secret"})
+    with urllib.request.urlopen(req) as resp:
+        body = resp.read().decode()
+        assert resp.headers["Content-Type"].startswith("text/plain")
+    assert 'stratadb_records{collection="mx"} 1' in body
+    assert 'stratadb_requests_total{action="search",status="200"} 1' in body
+    assert 'stratadb_requests_total{action="collections",status="404"} 1' in body
+    assert 'stratadb_request_seconds_total{action="upsert"}' in body
+    assert "stratadb_up 1" in body
+    with pytest.raises(urllib.error.HTTPError):
+        urllib.request.urlopen(server + "/metrics")     # key required
