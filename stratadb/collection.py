@@ -259,24 +259,21 @@ class Collection:
             vecs = vecs[order]
             metadata = [metadata[i] for i in order] if metadata is not None else None
         vecs = prepare(vecs, self.config.metric)
-        # Feed the growing segment in slices so a big batch seals into
-        # threshold-sized segments instead of one oversized one. Sealing runs
-        # outside the lock: it may wait for a previous background build.
-        start = 0
-        while start < len(ids):
+        # One WAL entry per batch, so a crash keeps all of it or none of it.
+        data = {"ids": ids, "metadata": metadata}
+        with self._lock:
+            self._check_open()
+            self.wal.append("upsert", data, vecs)
+            self._apply("upsert", data, vecs)
+            full = self._growing_full
+            if not full:
+                self._maybe_checkpoint()
+        # A big batch seals into threshold-sized segments, one after another.
+        # Sealing runs outside the lock: it may wait for a previous build.
+        while full:
+            self.seal(only_if_full=True)
             with self._lock:
-                self._check_open()
-                room = max(1, self.config.seal_threshold - len(self.growing))
-                end = min(len(ids), start + room)
-                data = {"ids": ids[start:end], "metadata": metadata[start:end] if metadata is not None else None}
-                self.wal.append("upsert", data, vecs[start:end])
-                self._apply("upsert", data, vecs[start:end])
-                full = self._growing_full
-                if not full:
-                    self._maybe_checkpoint()
-            if full:
-                self.seal(only_if_full=True)
-            start = end
+                full = not self._closed and self._growing_full
         return len(ids)
 
     def delete(self, ids: Iterable[str]) -> int:
@@ -567,8 +564,14 @@ class Collection:
             seg_id = self._next_seg
             self._next_seg += 1
             frozen = self.growing
-            self.frozen = frozen
             self.growing = GrowingSegment(self.config.dim, self.config.metric)
+            if len(frozen) > self.config.seal_threshold:
+                # Seal one threshold-sized chunk; the rest stays in growing.
+                chunk, rest = GrowingSegment(self.config.dim, self.config.metric), self.growing
+                for i, (rid, vec, meta) in enumerate(frozen.records()):
+                    (chunk if i < self.config.seal_threshold else rest).put(rid, vec, meta)
+                frozen = chunk
+            self.frozen = frozen
             for rid in frozen.pos:
                 self.locator[rid] = FROZEN
             records = [(rid, vec.copy(), meta) for rid, vec, meta in frozen.records()]
