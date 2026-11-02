@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
 - `GET /collections/<name>/export` streams a JSON-lines dump; `RemoteCollection.export_jsonl`;
   an Export button in the console.
