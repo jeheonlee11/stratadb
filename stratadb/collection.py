@@ -733,9 +733,9 @@ class Collection:
         # Synchronous build: release the lock while building, like a thread would.
         self._lock.release()
         try:
-        self._build_and_install(seg_id, frozen, records)
+            self._build_and_install(seg_id, frozen, records)
         finally:
-        self._lock.acquire()
+            self._lock.acquire()
         return seg_id
 
     def _build_segment(self, seg_id: int, records) -> SealedSegment:
