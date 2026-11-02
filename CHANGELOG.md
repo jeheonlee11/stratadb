@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- `fields=[...]` on `search`, `get` and `scan` returns only those metadata
+  keys (dotted paths allowed); embedded, HTTP and client.
+
 ## 0.5.0
 
 - `GET /collections/<name>/export` streams a JSON-lines dump; `RemoteCollection.export_jsonl`;

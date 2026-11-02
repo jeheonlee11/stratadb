@@ -74,22 +74,22 @@ class RemoteCollection:
     def delete(self, ids) -> int:
         return self._post("delete", {"ids": list(ids)})["deleted"]
 
-    def get(self, ids, include_vectors: bool = False) -> list[dict]:
-        return self._post("get", {"ids": list(ids), "include_vectors": include_vectors})["records"]
+    def get(self, ids, include_vectors: bool = False, fields=None) -> list[dict]:
+        return self._post("get", {"ids": list(ids), "include_vectors": include_vectors, "fields": fields})["records"]
 
     def search(self, vector=None, k: int = 10, filter=None, ef=None, include_vectors=False,
-               expand_hops: int = 0, graph_boost: float = 0.0, text: str | None = None) -> list[dict]:
+               expand_hops: int = 0, graph_boost: float = 0.0, text: str | None = None, fields=None) -> list[dict]:
         body = {"vector": None if vector is None else _jsonable(vector), "k": k, "filter": filter, "ef": ef,
                 "include_vectors": include_vectors, "expand_hops": expand_hops, "graph_boost": graph_boost,
-                "text": text}
+                "text": text, "fields": fields}
         return self._post("search", body)["hits"]
 
     def search_many(self, vectors, k: int = 10, **kwargs) -> list[list[dict]]:
         body = {"vectors": _jsonable(vectors), "k": k, **kwargs}
         return self._post("search_many", body)["results"]
 
-    def scan(self, filter=None, limit=None, offset: int = 0) -> list[dict]:
-        return self._post("scan", {"filter": filter, "limit": limit, "offset": offset})["records"]
+    def scan(self, filter=None, limit=None, offset: int = 0, fields=None) -> list[dict]:
+        return self._post("scan", {"filter": filter, "limit": limit, "offset": offset, "fields": fields})["records"]
 
     def count(self, filter=None) -> int:
         return self._post("count", {"filter": filter})["count"]

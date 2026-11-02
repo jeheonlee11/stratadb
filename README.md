@@ -23,6 +23,7 @@ kb.search(q, k=5, expand_hops=1)                          # attach each hit's ne
 kb.search(q, k=5, graph_boost=0.4)                        # re-rank by spreading activation over edges
 kb.search(q, text="E1042 checksum", k=5)                  # hybrid: vector + BM25 keyword, fused
 kb.search_many(queries, k=5)                               # many queries, one call
+kb.search(q, k=5, fields=["title", "meta.page"])           # return only those metadata keys
 ```
 
 ## Why graph-native
@@ -169,7 +170,7 @@ notes.search(query, k=5, graph_boost=0.3)
 | GET / DELETE | `/collections/<name>` | |
 | POST | `/collections/<name>/upsert` | `{ids, vectors, metadata?}` |
 | POST | `/collections/<name>/search_many` | `{vectors, k?, ...same options}` |
-| POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
+| POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, fields?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
 | POST | `/collections/<name>/get` · `delete` · `scan` · `count` | `{ids}` / `{ids}` / `{filter?, limit?, offset?}` / `{filter?}` |
 | POST | `/collections/<name>/update` · `delete_where` | `{ids, patch, replace?}` / `{filter}` |
 | POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
@@ -298,7 +299,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 132 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 134 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

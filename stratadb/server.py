@@ -109,14 +109,15 @@ class Api:
                                    {"upserted": col.upsert(body["ids"], body["vectors"], body.get("metadata"))})[1],
                 "delete": lambda: (_require(body, "ids"), {"deleted": col.delete(body["ids"])})[1],
                 "get": lambda: (_require(body, "ids"),
-                                {"records": col.get(body["ids"], bool(body.get("include_vectors")))})[1],
+                                {"records": col.get(body["ids"], bool(body.get("include_vectors")), body.get("fields"))})[1],
                 "search": lambda: {"hits": col.search(
                     body.get("vector"), int(body.get("k", 10)),
-                    **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text"))},
+                    **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text", "fields"))},
                 "search_many": lambda: (_require(body, "vectors"), {"results": col.search_many(
                     body["vectors"], int(body.get("k", 10)),
                     **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text"))})[1],
-                "scan": lambda: {"records": col.scan(body.get("filter"), body.get("limit"), int(body.get("offset") or 0))},
+                "scan": lambda: {"records": col.scan(body.get("filter"), body.get("limit"), int(body.get("offset") or 0),
+                                                     body.get("fields"))},
                 "count": lambda: {"count": col.count(body.get("filter"))},
                 "update": lambda: (_require(body, "ids", "patch"), {"updated": col.update_metadata(
                     body["ids"], body["patch"], bool(body.get("replace")))})[1],

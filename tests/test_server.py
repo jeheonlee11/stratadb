@@ -130,3 +130,12 @@ def test_search_many_endpoint(server):
     col.upsert(["a", "b", "c"], np.eye(4)[:3])
     rows = col.search_many(np.eye(4)[:2], k=1)
     assert [r[0]["id"] for r in rows] == ["a", "b"]
+
+
+def test_fields_projection_over_http(server):
+    client = Client(server, api_key="secret")
+    col = client.create_collection("f", dim=4)
+    col.upsert(["a"], np.eye(4)[:1], [{"k": 1, "big": "x" * 1000}])
+    assert col.search(np.eye(4)[0], k=1, fields=["k"])[0]["metadata"] == {"k": 1}
+    assert col.get(["a"], fields=["k"])[0]["metadata"] == {"k": 1}
+    assert col.scan(fields=["k"])[0]["metadata"] == {"k": 1}

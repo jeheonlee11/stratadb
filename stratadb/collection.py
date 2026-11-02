@@ -83,6 +83,25 @@ class CollectionConfig:
             raise ValueError("seal_threshold must be at least 2")
 
 
+def project(meta: dict, fields) -> dict:
+    """Keep only ``fields`` of a metadata dict (dotted paths allowed); None keeps all."""
+    if fields is None:
+        return meta
+    out: dict = {}
+    for f in fields:
+        src, dst = meta, out
+        parts = f.split(".")
+        for part in parts[:-1]:
+            if not isinstance(src, dict) or part not in src:
+                src = None
+                break
+            src = src[part]
+            dst = dst.setdefault(part, {})
+        if isinstance(src, dict) and parts[-1] in src:
+            dst[parts[-1]] = src[parts[-1]]
+    return out
+
+
 def similarity(distance: float, metric: str) -> float:
     """Turn a distance into a "bigger is better" score."""
     return 1.0 - distance if metric == "cosine" else -distance
@@ -449,7 +468,7 @@ class Collection:
             return None
         return self._segment(where).get(rid)
 
-    def get(self, ids: Iterable[str], include_vectors: bool = False) -> list[dict]:
+    def get(self, ids: Iterable[str], include_vectors: bool = False, fields: list[str] | None = None) -> list[dict]:
         out = []
         with self._lock:
             for rid in ids:
@@ -457,14 +476,16 @@ class Collection:
                 if found is None:
                     continue
                 vec, meta = found
-                rec: dict[str, Any] = {"id": str(rid), "metadata": meta}
+                rec: dict[str, Any] = {"id": str(rid), "metadata": project(meta, fields)}
                 if include_vectors:
                     rec["vector"] = vec.tolist()
                 out.append(rec)
         return out
 
-    def scan(self, filter: dict | None = None, limit: int | None = None, offset: int = 0) -> list[dict]:
-        """Records matching ``filter``, in id order; page with ``offset`` / ``limit``."""
+    def scan(self, filter: dict | None = None, limit: int | None = None, offset: int = 0,
+             fields: list[str] | None = None) -> list[dict]:
+        """Records matching ``filter``, in id order; page with ``offset`` / ``limit``.
+        ``fields`` keeps only those metadata keys (dotted paths allowed)."""
         if offset < 0 or (limit is not None and limit < 0):
             raise ValueError("offset and limit must be non-negative")
         pred = compile_filter(filter)
@@ -484,7 +505,7 @@ class Collection:
                            if pred is None or pred(meta)]
         matched.sort(key=lambda rm: rm[0])
         end = None if limit is None else offset + limit
-        return [{"id": rid, "metadata": meta} for rid, meta in matched[offset:end]]
+        return [{"id": rid, "metadata": project(meta, fields)} for rid, meta in matched[offset:end]]
 
     def search(
         self,
@@ -496,6 +517,7 @@ class Collection:
         expand_hops: int = 0,
         graph_boost: float = 0.0,
         text: str | None = None,
+        fields: list[str] | None = None,
     ) -> list[dict]:
         """Vector, keyword or hybrid search across all segments.
 
@@ -504,6 +526,7 @@ class Collection:
                          vector too, the two rankings are merged by reciprocal
                          rank fusion
         ``filter``       metadata filter (see ``stratadb.filters``)
+        ``fields``       metadata keys to return (dotted paths allowed); default all
         ``expand_hops``  attach graph neighbours (up to N hops) to each hit
         ``graph_boost``  0..1; re-rank with spreading activation over edges, so
                          records strongly linked to many good matches move up
@@ -577,7 +600,7 @@ class Collection:
             results = []
             for score, rid in order:
                 vec, meta = self._locate(rid)
-                res: dict[str, Any] = {"id": rid, "score": score, "metadata": meta}
+                res: dict[str, Any] = {"id": rid, "score": score, "metadata": project(meta, fields)}
                 if q is not None and not hybrid:
                     res.update(vec_info[rid])
                 if hybrid:

@@ -64,3 +64,17 @@ def test_search_many_matches_single_searches(tmp_path):
     assert col.search_many(vecs[0], k=1)[0][0]["id"] == "r00"
     with pytest.raises(ValueError):
         col.search_many(np.zeros((2, 2, 8)))
+
+
+def test_fields_projection(tmp_path):
+    from stratadb.collection import project
+
+    assert project({"a": 1, "b": {"c": 2, "d": 3}}, ["a", "b.c", "missing", "b.zz"]) == {"a": 1, "b": {"c": 2}}
+    assert project({"a": 1}, None) == {"a": 1}
+    col = make(tmp_path)
+    vecs = seed(col)
+    hit = col.search(vecs[3], 1, fields=["tag"])[0]
+    assert hit["metadata"] == {"tag": "odd"} and hit["id"] == "r03"
+    assert col.get(["r04"], fields=["n"])[0]["metadata"] == {"n": 4}
+    assert col.scan({"tag": "even"}, limit=1, fields=["text"])[0]["metadata"] == {"text": "item 0"}
+    assert col.get(["r04"])[0]["metadata"]["text"] == "item 4"   # stored metadata untouched
