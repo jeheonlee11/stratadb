@@ -22,5 +22,8 @@ stratadb = "stratadb.__main__:main"
 [tool.setuptools.packages.find]
 include = ["stratadb*"]
 
+[tool.setuptools.package-data]
+stratadb = ["console.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

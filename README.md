@@ -83,8 +83,11 @@ activation, so a weak, barely related match can't promote its neighbours.
 - **Hybrid search**: a BM25 keyword index over one metadata field, fused with
   vector results by reciprocal rank fusion. Catches exact tokens (error codes,
   function names, part numbers) that embeddings blur.
-- **Server + client**: standard-library JSON/HTTP server with optional
-  bearer-token auth; a client with the same method names as the embedded API.
+- **Server, client and console**: standard-library JSON/HTTP server with
+  optional bearer-token auth, a client with the same method names as the
+  embedded API, and a built-in web console (collections, filtered scans,
+  keyword search, "more like this", graph explorer).
+- **Online backups**: a point-in-time copy of a live database.
 
 ## Install
 
@@ -145,10 +148,15 @@ notes.search(query, k=5, graph_boost=0.3)
 | POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
 | POST | `/collections/<name>/get` · `delete` · `scan` | `{ids}` / `{ids}` / `{filter?, limit?}` |
 | POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
-| POST | `/collections/<name>/nodes` · `get_nodes` | `{nodes: [{id, props}]}` / `{ids}` |
+| POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
 | POST | `/collections/<name>/checkpoint` · `compact` | |
 
-Maintenance from the shell: `stratadb stats|compact|checkpoint --path ./data [collection]`.
+Open `http://127.0.0.1:7700/` for the **web console**: browse collections and their stats,
+run filtered scans and keyword searches, find records similar to any stored record (using its
+own vector, so no embedding model is needed), and explore the graph around a node.
+
+Maintenance from the shell: `stratadb stats|compact|checkpoint --path ./data [collection]`, and
+`stratadb backup --path ./data --out ./backup` for a consistent online copy.
 
 ## Configuration
 

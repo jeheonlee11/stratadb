@@ -2,6 +2,7 @@
 
 Endpoints, all JSON in and out::
 
+    GET    /                               web console
     GET    /health
     GET    /collections
     POST   /collections                    {name, dim, metric?, ...options}
@@ -17,6 +18,7 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/neighbors   {id, hops?, rel?, direction?, limit?, hydrate?}
     POST   /collections/<name>/nodes       {nodes: [{id, props}]}
     POST   /collections/<name>/get_nodes   {ids}
+    POST   /collections/<name>/list_nodes  {limit?, offset?, prefix?}
     POST   /collections/<name>/checkpoint
     POST   /collections/<name>/compact
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+from importlib import resources
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
@@ -108,6 +111,8 @@ class Api:
                     body["id"], **_pick(body, "hops", "rel", "direction", "limit", "hydrate"))})[1],
                 "nodes": lambda: (_require(body, "nodes"), {"put": col.put_nodes(body["nodes"])})[1],
                 "get_nodes": lambda: (_require(body, "ids"), {"nodes": col.get_nodes(body["ids"])})[1],
+                "list_nodes": lambda: col.list_nodes(int(body.get("limit", 100)), int(body.get("offset", 0)),
+                                                     body.get("prefix")),
                 "checkpoint": lambda: {"lsn": col.checkpoint()},
                 "compact": lambda: col.compact(),
             }.get(action)
@@ -138,7 +143,18 @@ def make_handler(api: Api, api_key: str | None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_console(self) -> None:
+            data = resources.files("stratadb").joinpath("console.html").read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _dispatch(self, method: str) -> None:
+            if method == "GET" and self.path.split("?")[0] in ("/", "/console"):
+                self._send_console()  # the page is static; its API calls carry the key
+                return
             try:
                 if api_key and self.path.split("?")[0] != "/health":
                     supplied = self.headers.get("Authorization", "")

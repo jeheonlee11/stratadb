@@ -104,6 +104,9 @@ class RemoteCollection:
     def get_nodes(self, ids) -> dict[str, dict]:
         return self._post("get_nodes", {"ids": list(ids)})["nodes"]
 
+    def list_nodes(self, limit: int = 100, offset: int = 0, prefix: str | None = None) -> dict:
+        return self._post("list_nodes", {"limit": limit, "offset": offset, "prefix": prefix})
+
     def checkpoint(self) -> int:
         return self._post("checkpoint")["lsn"]
 

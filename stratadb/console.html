@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StrataDB Console</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e2dd;
+    --accent: #2f6f5e; --accent-ink: #ffffff; --soft: #eef4f1; --warn: #a33b2b; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141413; --panel: #1d1d1b; --ink: #ecebe6; --muted: #9a9993; --line: #2e2e2b;
+            --accent: #6fbfa6; --accent-ink: #10201b; --soft: #1f2a26; --warn: #e2725f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .02em; }
+  header .grow { flex: 1; }
+  input, select, textarea, button { font: inherit; color: inherit; }
+  input, select, textarea { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea { font-family: var(--mono); font-size: 12px; width: 100%; resize: vertical; }
+  button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  main { display: grid; grid-template-columns: 260px 1fr; min-height: calc(100vh - 54px); }
+  @media (max-width: 760px) { main { grid-template-columns: 1fr; min-height: auto; } aside { border-right: 0; border-bottom: 1px solid var(--line); } }
+  aside { border-right: 1px solid var(--line); padding: 12px; background: var(--panel); }
+  aside h2, section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 4px 0 8px; }
+  .col { padding: 8px 10px; border-radius: 6px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; min-width: 0; }
+  .col span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  .col small { flex: none; }
+  .col:hover { background: var(--soft); }
+  .col.active { background: var(--soft); outline: 1px solid var(--accent); }
+  .col small { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .content { padding: 16px 20px; display: grid; gap: 16px; align-content: start; min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
+  .stat b { display: block; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 12px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
+  .tab { padding: 6px 10px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); }
+  .tab.active { color: var(--ink); border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.id { font-family: var(--mono); white-space: nowrap; }
+  td.meta { font-family: var(--mono); font-size: 12px; word-break: break-word; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .link { color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .err { color: var(--warn); font-family: var(--mono); font-size: 12px; white-space: pre-wrap; }
+  .muted { color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  svg { width: 100%; height: 420px; display: block; }
+  svg text { fill: var(--ink); font-size: 11px; font-family: var(--mono); }
+  svg line { stroke: var(--line); stroke-width: 1.5; }
+  svg .center circle { fill: var(--accent); }
+  svg .hop1 circle { fill: var(--soft); stroke: var(--accent); }
+  svg .hop2 circle { fill: var(--panel); stroke: var(--muted); }
+  svg g.node { cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>StrataDB</h1>
+  <span class="muted" id="version"></span>
+  <span class="grow"></span>
+  <label class="row">API key <input id="apikey" type="password" placeholder="(if the server needs one)" size="22"></label>
+  <button class="ghost" id="refresh">Refresh</button>
+</header>
+<main>
+  <aside>
+    <h2>Collections</h2>
+    <div id="collections"><span class="muted">Loading…</span></div>
+  </aside>
+  <div class="content" id="content">
+    <div class="card muted">Pick a collection to inspect it.</div>
+  </div>
+</main>
+<script>
+const $ = (sel, el = document) => el.querySelector(sel);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+let current = null, currentStats = null, activeTab = "scan";
+
+try { $("#apikey").value = localStorage.getItem("strata-key") || ""; } catch (e) {}
+$("#apikey").addEventListener("change", () => { try { localStorage.setItem("strata-key", $("#apikey").value); } catch (e) {} loadCollections(); });
+$("#refresh").addEventListener("click", () => { loadCollections(); if (current) select(current); });
+
+async function api(method, path, body) {
+  const headers = {"Content-Type": "application/json"};
+  const key = $("#apikey").value.trim();
+  if (key) headers["Authorization"] = "Bearer " + key;
+  const res = await fetch(path, {method, headers, body: body === undefined ? undefined : JSON.stringify(body)});
+  const data = await res.json().catch(() => ({error: res.statusText}));
+  if (!res.ok) throw new Error(`${res.status}: ${data.error || res.statusText}`);
+  return data;
+}
+
+async function loadCollections() {
+  const box = $("#collections");
+  try {
+    const health = await api("GET", "/health");
+    $("#version").textContent = "v" + health.version;
+    const {collections} = await api("GET", "/collections");
+    if (!collections.length) { box.innerHTML = '<span class="muted">No collections yet.</span>'; return; }
+    const stats = await Promise.all(collections.map(n => api("GET", "/collections/" + encodeURIComponent(n)).catch(() => null)));
+    box.innerHTML = collections.map((n, i) => {
+      const s = stats[i];
+      const label = s ? (s.dim === 0 ? `${s.nodes} nodes` : `${s.count.toLocaleString()} · ${s.dim}d`) : "";
+      return `<div class="col ${n === current ? "active" : ""}" data-name="${esc(n)}" title="${esc(n)}"><span>${esc(n)}</span><small>${label}</small></div>`;
+    }).join("");
+    box.querySelectorAll(".col").forEach(el => el.addEventListener("click", () => select(el.dataset.name)));
+  } catch (e) {
+    box.innerHTML = `<div class="err">${esc(e.message)}</div>`;
+  }
+}
+
+async function select(name) {
+  current = name;
+  document.querySelectorAll(".col").forEach(el => el.classList.toggle("active", el.dataset.name === name));
+  const content = $("#content");
+  try {
+    currentStats = await api("GET", "/collections/" + encodeURIComponent(name));
+  } catch (e) { content.innerHTML = `<div class="card err">${esc(e.message)}</div>`; return; }
+  const s = currentStats;
+  const segs = s.sealed_segments || [];
+  content.innerHTML = `
+    <div class="card">
+      <h2>${esc(s.name)}</h2>
+      <div class="stats">
+        ${stat(s.count.toLocaleString(), "records")}${stat(s.dim === 0 ? "graph" : s.dim, "dimensions")}
+        ${stat(s.dim === 0 ? "n/a" : s.metric, "metric")}${stat(segs.length, "sealed segments")}${stat(s.growing + (s.sealing || 0), "growing / sealing")}
+        ${stat((s.edges || 0).toLocaleString(), "edges")}${stat((s.nodes || 0).toLocaleString(), "nodes")}
+        ${stat(fmtBytes(s.wal_bytes), "WAL")}
+      </div>
+    </div>
+    <div class="card">
+      <div class="tabs">
+        <div class="tab" data-tab="scan">Browse &amp; filter</div>
+        <div class="tab" data-tab="keyword">Keyword search</div>
+        <div class="tab" data-tab="similar">More like this</div>
+        <div class="tab" data-tab="graph">Graph</div>
+      </div>
+      <div id="panel"></div>
+    </div>`;
+  content.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showTab(t.dataset.tab)));
+  if (s.dim === 0) {
+    // Graph-only: no vectors to search, so hide the vector tabs.
+    content.querySelectorAll('.tab[data-tab="keyword"], .tab[data-tab="similar"]').forEach(t => t.remove());
+    if (activeTab === "keyword" || activeTab === "similar") activeTab = "scan";
+  }
+  showTab(activeTab);
+}
+
+const stat = (v, label) => `<div class="stat"><b>${esc(v)}</b><span>${label}</span></div>`;
+const truncate = (t, n) => t.length > n ? t.slice(0, n - 1) + "…" : t;
+const fmtBytes = b => b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(1) + " MB";
+
+function showTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === tab));
+  const panel = $("#panel");
+  if (tab === "scan" && currentStats && currentStats.dim === 0) {
+    panel.innerHTML = `
+      <div class="row"><input id="prefix" placeholder="node id prefix (optional)" style="flex:1;min-width:160px">
+        <button id="run">List nodes</button></div>
+      <div id="out" style="margin-top:10px"></div>`;
+    const run = async () => {
+      const out = $("#out");
+      try {
+        const prefix = $("#prefix").value.trim() || null;
+        const page = await api("POST", `/collections/${encodeURIComponent(current)}/list_nodes`, {limit: 200, prefix});
+        out.innerHTML = `<p class="muted">${page.total} node(s)${page.total > 200 ? ", first 200 shown" : ""}.</p>` +
+          (page.nodes.length ? `<div class="scroll"><table><tr><th>node</th><th>degree</th><th>properties</th></tr>${page.nodes.map(n =>
+            `<tr><td class="id"><span class="link" data-id="${esc(n.id)}">${esc(n.id)}</span></td><td class="num">${n.degree}</td>` +
+            `<td class="meta">${esc(truncate(JSON.stringify(n.props), 240))}</td></tr>`).join("")}</table></div>` : "");
+        bindIds(out);
+      } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    };
+    $("#run").onclick = run;
+    $("#prefix").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+    run();
+  } else if (tab === "scan") {
+    panel.innerHTML = `
+      <div class="row" style="align-items:flex-start">
+        <textarea id="filter" rows="2" placeholder='Metadata filter, e.g. {"year": {"$gte": 2020}}'></textarea>
+      </div>
+      <div class="row" style="margin:8px 0"><label>Limit <input id="limit" type="number" value="50" min="1" style="width:80px"></label>
+        <button id="run">Run</button></div>
+      <div id="out"></div>`;
+    $("#run").onclick = async () => {
+      const out = $("#out");
+      try {
+        const filter = $("#filter").value.trim() ? JSON.parse($("#filter").value) : null;
+        const {records} = await api("POST", `/collections/${encodeURIComponent(current)}/scan`, {filter, limit: +$("#limit").value});
+        out.innerHTML = recordTable(records);
+        bindIds(out);
+      } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    };
+    $("#run").click();
+  } else if (tab === "keyword") {
+    panel.innerHTML = `
+      <div class="row"><input id="q" placeholder="keywords (needs a collection created with text_field)" style="flex:1;min-width:200px">
+        <label>k <input id="k" type="number" value="10" min="1" style="width:70px"></label><button id="run">Search</button></div>
+      <div id="out" style="margin-top:10px"></div>`;
+    const run = async () => {
+      const out = $("#out");
+      try {
+        const {hits} = await api("POST", `/collections/${encodeURIComponent(current)}/search`, {text: $("#q").value, k: +$("#k").value});
+        out.innerHTML = hitTable(hits, "keyword_score");
+        bindIds(out);
+      } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    };
+    $("#run").onclick = run;
+    $("#q").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+  } else if (tab === "similar") {
+    panel.innerHTML = `
+      <p class="muted" style="margin-top:0">Uses a stored record's own vector as the query: no embedding model needed.</p>
+      <div class="row"><input id="rid" placeholder="record id" style="flex:1;min-width:160px">
+        <label>k <input id="k" type="number" value="10" min="1" style="width:70px"></label>
+        <label>graph boost <input id="boost" type="number" value="0" min="0" max="1" step="0.1" style="width:70px"></label>
+        <button id="run">Find similar</button></div>
+      <div id="out" style="margin-top:10px"></div>`;
+    $("#run").onclick = () => similar($("#rid").value.trim());
+  } else if (tab === "graph") {
+    panel.innerHTML = `
+      <div class="row"><input id="node" placeholder="node or record id" style="flex:1;min-width:160px">
+        <label>hops <select id="hops"><option>1</option><option selected>2</option></select></label>
+        <button id="run">Explore</button></div>
+      <div id="graph" style="margin-top:10px"></div>`;
+    $("#run").onclick = () => explore($("#node").value.trim());
+    $("#node").addEventListener("keydown", e => { if (e.key === "Enter") explore($("#node").value.trim()); });
+  }
+}
+
+function recordTable(records) {
+  if (!records.length) return '<p class="muted">No records.</p>';
+  return `<div class="scroll"><table><tr><th>id</th><th>metadata</th></tr>${records.map(r =>
+    `<tr><td class="id"><span class="link" data-id="${esc(r.id)}">${esc(r.id)}</span></td><td class="meta">${esc(truncate(JSON.stringify(r.metadata), 300))}</td></tr>`).join("")}</table></div>`;
+}
+
+function hitTable(hits, extra) {
+  if (!hits.length) return '<p class="muted">No hits.</p>';
+  const cols = extra ? ["score", extra] : ["score"];
+  return `<div class="scroll"><table><tr><th>id</th>${cols.map(c => `<th>${c.replace("_", " ")}</th>`).join("")}<th>metadata</th></tr>${hits.map(h =>
+    `<tr><td class="id"><span class="link" data-id="${esc(h.id)}">${esc(h.id)}</span></td>${cols.map(c =>
+      `<td class="num">${h[c] === undefined ? "" : Number(h[c]).toFixed(3)}</td>`).join("")}<td class="meta">${esc(truncate(JSON.stringify(h.metadata), 300))}</td></tr>`).join("")}</table></div>`;
+}
+
+function bindIds(el) {
+  el.querySelectorAll(".link[data-id]").forEach(a => a.addEventListener("click", () => {
+    if (currentStats && currentStats.dim === 0) { showTab("graph"); $("#node").value = a.dataset.id; explore(a.dataset.id); }
+    else { showTab("similar"); $("#rid").value = a.dataset.id; similar(a.dataset.id); }
+  }));
+}
+
+async function similar(rid) {
+  const out = $("#out");
+  if (!rid) return;
+  try {
+    const {records} = await api("POST", `/collections/${encodeURIComponent(current)}/get`, {ids: [rid], include_vectors: true});
+    if (!records.length) throw new Error(`no record with id ${rid}`);
+    const boost = +($("#boost") ? $("#boost").value : 0);
+    const {hits} = await api("POST", `/collections/${encodeURIComponent(current)}/search`,
+      {vector: records[0].vector, k: +$("#k").value, graph_boost: boost});
+    out.innerHTML = hitTable(hits, boost > 0 ? "graph_score" : null);
+    bindIds(out);
+  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+async function explore(id) {
+  const box = $("#graph");
+  if (!id) return;
+  try {
+    const hops = +$("#hops").value;
+    const {neighbors} = await api("POST", `/collections/${encodeURIComponent(current)}/neighbors`, {id, hops, limit: 60});
+    const props = (await api("POST", `/collections/${encodeURIComponent(current)}/get_nodes`, {ids: [id]})).nodes[id];
+    if (!neighbors.length) { box.innerHTML = `<p class="muted">${esc(id)} has no edges.</p>${props ? `<pre class="meta">${esc(JSON.stringify(props, null, 2))}</pre>` : ""}`; return; }
+    box.innerHTML = drawGraph(id, neighbors) +
+      `<p class="muted">Click a node to re-center. ${neighbors.length} neighbour(s) within ${hops} hop(s).</p>` +
+      (props ? `<pre class="meta" style="font-family:var(--mono);font-size:12px">${esc(JSON.stringify(props, null, 2))}</pre>` : "");
+    box.querySelectorAll("g.node").forEach(g => g.addEventListener("click", () => { $("#node").value = g.dataset.id; explore(g.dataset.id); }));
+  } catch (e) { box.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+function drawGraph(center, neighbors) {
+  const W = 800, H = 420, cx = W / 2, cy = H / 2;
+  const pos = {[center]: [cx, cy]};
+  const ring1 = neighbors.filter(n => n.hops === 1), ring2 = neighbors.filter(n => n.hops === 2);
+  ring1.forEach((n, i) => { const a = 2 * Math.PI * i / ring1.length - Math.PI / 2; pos[n.id] = [cx + 130 * Math.cos(a), cy + 120 * Math.sin(a)]; });
+  ring2.forEach((n, i) => {
+    const parent = pos[n.via] || [cx, cy];
+    const base = Math.atan2(parent[1] - cy, parent[0] - cx);
+    const sibs = ring2.filter(m => m.via === n.via), j = sibs.indexOf(n);
+    const a = base + (j - (sibs.length - 1) / 2) * 0.28;
+    pos[n.id] = [cx + 300 * Math.cos(a), cy + 185 * Math.sin(a)];
+  });
+  const lines = neighbors.map(n => { const [x1, y1] = pos[n.via], [x2, y2] = pos[n.id];
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"><title>${esc(n.rel)} (w=${n.weight})</title></line>`; }).join("");
+  const node = (id, cls, r) => { const [x, y] = pos[id]; const label = id.length > 22 ? id.slice(0, 21) + "…" : id;
+    return `<g class="node ${cls}" data-id="${esc(id)}"><circle cx="${x}" cy="${y}" r="${r}"></circle>` +
+      `<text x="${x}" y="${y + r + 12}" text-anchor="middle">${esc(label)}</text><title>${esc(id)}</title></g>`; };
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Neighbourhood of ${esc(center)}">${lines}` +
+    ring2.map(n => node(n.id, "hop2", 6)).join("") + ring1.map(n => node(n.id, "hop1", 9)).join("") + node(center, "center", 12) + `</svg>`;
+}
+
+loadCollections();
+</script>
+</body>
+</html>

@@ -79,3 +79,23 @@ def test_cli_stats_and_compact(tmp_path, capsys):
     assert '"count": 1' in capsys.readouterr().out
     cli_main(["compact", "--path", str(tmp_path / "db"), "a"])
     assert '"a"' in capsys.readouterr().out
+
+
+def test_console_page_is_served_without_key(server):
+    import urllib.request
+
+    with urllib.request.urlopen(server + "/") as resp:
+        body = resp.read().decode()
+        assert resp.headers["Content-Type"].startswith("text/html")
+    assert "<title>StrataDB Console</title>" in body
+
+
+def test_list_nodes_pages_and_filters(server):
+    client = Client(server, api_key="secret")
+    g = client.create_collection("kg", dim=0)
+    g.put_nodes([{"id": f"n{i:02d}", "props": {"i": i}} for i in range(15)])
+    g.link([{"src": "n00", "dst": "n01"}])
+    page = g.list_nodes(limit=5, offset=0)
+    assert page["total"] == 15 and [n["id"] for n in page["nodes"]] == ["n00", "n01", "n02", "n03", "n04"]
+    assert page["nodes"][0]["degree"] == 1
+    assert g.list_nodes(prefix="n1")["total"] == 5

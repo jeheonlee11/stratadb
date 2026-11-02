@@ -344,6 +344,14 @@ class Collection:
         with self._lock:
             return self.graph.node_ids()
 
+    def list_nodes(self, limit: int = 100, offset: int = 0, prefix: str | None = None) -> dict:
+        """Page through nodes (sorted by id), optionally by id prefix."""
+        with self._lock:
+            ids = sorted(n for n in self.graph.node_ids() if prefix is None or n.startswith(prefix))
+            page = ids[offset:offset + limit]
+            return {"total": len(ids), "nodes": [{"id": n, "props": dict(self.graph.get_node(n)),
+                                                  "degree": len(self.graph.neighbor_ids(n))} for n in page]}
+
     # ------------------------------------------------------------- read API
     def __len__(self) -> int:
         return len(self.locator)
