@@ -1,0 +1,3 @@
+# StrataDB
+
+Work in progress.
