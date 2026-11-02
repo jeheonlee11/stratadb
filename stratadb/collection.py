@@ -753,6 +753,28 @@ class Collection:
                 self._pool_broken = True
         return SealedSegment.build(*args)
 
+    def _build_segments(self, chunks) -> list:
+        """Build several segments, concurrently in worker processes when available."""
+        big = [c for c in chunks if len(c[1]) >= self.config.build_process_min_records]
+        pool = self._executor() if len(big) > 1 else None
+        if pool is None:
+            return [self._build_segment(seg_id, chunk) for seg_id, chunk in chunks]
+        try:
+            futures = {}
+            for seg_id, chunk in chunks:
+                path = self.path / f"seg-{seg_id}"
+                futures[seg_id] = SealedSegment.submit_build(
+                    path, chunk, self.config.metric, self.config.m, self.config.ef_construction, pool)
+            for f in futures.values():
+                f.result()
+            return [SealedSegment.load(seg_id, self.path / f"seg-{seg_id}", []) for seg_id, _ in chunks]
+        except Exception:  # noqa: BLE001 - worker pool unusable: build in-process instead
+            log.warning("worker-process builds failed for %s; building in-process instead",
+                        self.name, exc_info=True)
+            self._pool = None
+            self._pool_broken = True
+            return [self._build_segment(seg_id, chunk) for seg_id, chunk in chunks]
+
     def _executor(self):
         if self.config.build_processes <= 0 or self._pool_broken:
             return None
@@ -894,7 +916,7 @@ class Collection:
 
     def _compact_build(self, victim_ids: list[int], chunks) -> dict:
         try:
-            built = [self._build_segment(seg_id, chunk) for seg_id, chunk in chunks]
+            built = self._build_segments(chunks)
         except Exception as e:  # noqa: BLE001 - old segments stay in place; nothing is lost
             log.exception("compacting %s failed", self.name)
             with self._lock:

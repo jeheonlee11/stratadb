@@ -202,14 +202,20 @@ class SealedSegment:
         return cls.load(seg_id, path, [])
 
     @classmethod
+    def submit_build(cls, path, records, metric, m, ef_construction, pool):
+        """Start building a segment in a worker process; returns the future.
+        Pair with ``load(seg_id, path, [])`` once the future completes."""
+        ids = [rid for rid, _, _ in records]
+        metas = [meta for _, _, meta in records]
+        vectors = np.stack([vec for _, vec, _ in records])
+        return pool.submit(build_segment_files, path, vectors, ids, metas, metric, m, ef_construction)
+
+    @classmethod
     def build_in_process(cls, seg_id, path, records, metric, m, ef_construction, pool) -> "SealedSegment":
         """Like ``build`` but the index is built in a worker process from ``pool``
         (a ``concurrent.futures`` executor), so it uses another CPU core and
         never contends for this process's GIL."""
-        ids = [rid for rid, _, _ in records]
-        metas = [meta for _, _, meta in records]
-        vectors = np.stack([vec for _, vec, _ in records])
-        pool.submit(build_segment_files, path, vectors, ids, metas, metric, m, ef_construction).result()
+        cls.submit_build(path, records, metric, m, ef_construction, pool).result()
         return cls.load(seg_id, path, [])
 
     @classmethod

@@ -43,3 +43,17 @@ def test_merge_over_http(tmp_path):
         assert c.merge(1)["segments"] == 1
     finally:
         srv.shutdown(); srv.server_close(); db.close()
+
+
+def test_merge_builds_chunks_concurrently_in_workers(tmp_path):
+    data = np.random.default_rng(2).normal(size=(4400, 8)).astype(np.float32)
+    col = Collection(tmp_path / "c", CollectionConfig(dim=8, seal_threshold=1100, background_seal=False,
+                                                       build_processes=2, build_process_min_records=2000,
+                                                       auto_compact=False))
+    col.upsert([f"r{i}" for i in range(4400)], data)
+    assert len(col.stats()["sealed_segments"]) == 4
+    result = col.merge(2)                       # two 2200-record chunks: both go to workers at once
+    assert result["segments"] == 2 and col._pool is not None and not col._pool_broken
+    assert sorted(s["live"] for s in col.stats()["sealed_segments"]) == [2200, 2200]
+    assert col.search(data[1234], 1, ef=100)[0]["id"] == "r1234"
+    col.close()

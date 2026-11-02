@@ -297,7 +297,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 130 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 131 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random
