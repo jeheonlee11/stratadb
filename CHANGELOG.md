@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Sealed segments' vectors are memory-mapped on reopen (stored in a separate
+  `vectors.npy`); older single-file segments still load.
 - Console: PageRank ranking and connected components in the Graph tab.
 
 ## 0.3.0

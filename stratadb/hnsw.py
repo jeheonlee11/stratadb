@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import heapq
 import math
+from pathlib import Path
 from typing import Callable
 
 import numpy as np
@@ -54,6 +55,7 @@ class HNSWIndex:
         # _links[node][level] -> list of neighbour labels
         self._links: list[list[list[int]]] = []
         self._deleted: set[int] = set()
+        self._readonly = False
         self.entry_point: int | None = None
         self.max_level = -1
 
@@ -173,6 +175,8 @@ class HNSWIndex:
 
     # ----------------------------------------------------------------- insert
     def add(self, vector) -> int:
+        if self._readonly:
+            raise RuntimeError("this index is memory-mapped and read-only")
         q = self._prepare(vector)
         label = len(self._levels)
         if label >= self._vectors.shape[0]:
@@ -266,7 +270,9 @@ class HNSWIndex:
         return [(labels[i], float(dists[i])) for i in top]
 
     # ------------------------------------------------------------ persistence
-    def save(self, path) -> None:
+    def save(self, path, vectors_path=None) -> None:
+        """Write the index to ``path`` (.npz). With ``vectors_path`` the vectors
+        go to that separate .npy file instead, so ``load`` can memory-map them."""
         n = len(self._levels)
         flat: list[int] = []
         offsets = [0]
@@ -274,9 +280,14 @@ class HNSWIndex:
             for lvl in range(self._levels[node] + 1):
                 flat.extend(self._links[node][lvl])
                 offsets.append(len(flat))
+        arrays = {}
+        if vectors_path is None:
+            arrays["vectors"] = self._vectors[:n]
+        else:
+            np.save(vectors_path, np.ascontiguousarray(self._vectors[:n]))
         np.savez(
             path,
-            vectors=self._vectors[:n],
+            **arrays,
             levels=np.asarray(self._levels, dtype=np.int32),
             links=np.asarray(flat, dtype=np.int32),
             offsets=np.asarray(offsets, dtype=np.int64),
@@ -290,13 +301,25 @@ class HNSWIndex:
         )
 
     @classmethod
-    def load(cls, path) -> "HNSWIndex":
+    def load(cls, path, mmap: bool = False) -> "HNSWIndex":
+        """Load an index. With ``mmap`` and vectors stored in a sibling
+        ``vectors.npy`` (see ``save``), the vectors are memory-mapped read-only:
+        reopening costs no copying, and pages load from disk on first touch.
+        A memory-mapped index is read-only: ``add`` raises."""
+        path = Path(path)
         with np.load(path, allow_pickle=False) as data:
             dim, m, efc, ep, max_level = (int(x) for x in data["params"])
-            idx = cls(dim, metric=str(data["metric"]), m=m, ef_construction=efc,
-                      capacity=max(1, len(data["levels"])))
             n = len(data["levels"])
-            idx._vectors[:n] = data["vectors"]
+            idx = cls(dim, metric=str(data["metric"]), m=m, ef_construction=efc, capacity=1)
+            if "vectors" in data:
+                idx._vectors = np.array(data["vectors"], dtype=np.float32)
+            else:
+                vec_path = path.with_name("vectors.npy")
+                loaded = np.load(vec_path, mmap_mode="r" if mmap else None)
+                # A plain ndarray view over the mapping: np.memmap is a subclass,
+                # and its per-operation overhead shows up in the search loop.
+                idx._vectors = np.asarray(loaded)
+                idx._readonly = mmap
             idx._levels = data["levels"].tolist()
             flat, offsets = data["links"], data["offsets"]
             pos = 0

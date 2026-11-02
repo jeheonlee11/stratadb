@@ -193,6 +193,12 @@ Set per collection at creation (`create_collection(name, dim, **options)`):
 | `background_seal` | `True` | build indexes in the background instead of blocking the write |
 | `build_processes` | 2 | worker processes for index builds (and how many build at once); 0 = in-process |
 | `build_process_min_records` | 2000 | smaller segments build in-process (a worker costs ~1 s to start) |
+
+Worker processes start with `spawn`, which re-imports your main script, so a
+script that writes to StrataDB needs the standard `if __name__ == "__main__":`
+guard (as with any use of `multiprocessing`). In a REPL or notebook, where there
+is no script to re-import, StrataDB notices the failed start and builds
+in-process instead.
 | `exact_search_limit` | 3,000,000 | segments with records x dim at or under this are scanned exactly |
 | `sync` | `flush` | WAL durability: `always` (fsync), `flush`, `never` |
 | `wal_checkpoint_bytes` | 64 MB | checkpoint when the WAL grows past this |
@@ -293,7 +299,9 @@ weren't atomic.)
 ## Limits
 
 - One process per collection directory (enforced with a lock file).
-- Each collection is held in memory.
+- Growing segments, metadata, the graph and the HNSW link structure are held in
+  memory; sealed segments' vectors are memory-mapped from disk, so RAM for a
+  large read-mostly collection is well below its on-disk size.
 - Index builds are pure Python, roughly 700 vectors/second per core at 384
   dims; they run in background worker processes, so they don't block writes
   and scale with cores.

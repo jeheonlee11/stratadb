@@ -71,8 +71,13 @@ about a second. If a worker can't start at all (spawn re-imports `__main__`,
 which fails under a REPL, a notebook or `python -`), the collection notes it
 and builds in-process from then on; nothing is lost either way.
 
-**Sealed.** The built segment is written to `seg-N/` (index + records) via a
-temporary directory and an atomic rename, then swapped in. Deletes and
+**Sealed.** The built segment is written to `seg-N/` (`index.npz` for the
+graph structure, `vectors.npy` for the vectors, `records.json` for ids and
+metadata) via a temporary directory and an atomic rename, then swapped in. On
+reopen the vectors are memory-mapped read-only rather than copied: opening a
+collection costs no vector I/O up front, pages come in from disk as searches
+touch them, and the OS can drop them under memory pressure. Segments written
+by 0.3.0 and earlier (vectors inside `index.npz`) still load, in memory. Deletes and
 overwrites that hit the frozen segment during the build are reconciled at
 swap time by tombstoning those ids in the new segment. A frozen record is
 located by its *future* segment id, so installing the built segment changes
@@ -251,7 +256,7 @@ only to install the finished segment. The HTTP server is a
 
 - Single process per collection: a `LOCK` file (flock / msvcrt) makes a
   second process fail fast instead of corrupting the WAL.
-- Everything for a collection is held in memory.
+- Everything except sealed vectors is held in memory.
 - The server has bearer-token auth only; put it behind TLS if it leaves
   localhost. The web console page itself is served without auth; every API
   call it makes needs the key.

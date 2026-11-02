@@ -155,7 +155,7 @@ def build_segment_files(path: Path, vectors: np.ndarray, ids: list[str], metas: 
     tmp = path.with_name(path.name + ".building")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
-    index.save(tmp / "index.npz")
+    index.save(tmp / "index.npz", tmp / "vectors.npy")
     atomic_write_json(tmp / "records.json", {"ids": ids, "metas": metas})
     shutil.rmtree(path, ignore_errors=True)
     os.replace(tmp, path)
@@ -214,7 +214,7 @@ class SealedSegment:
 
     @classmethod
     def load(cls, seg_id: int, path: Path, tombstones: list[int]) -> "SealedSegment":
-        index = HNSWIndex.load(path / "index.npz")
+        index = HNSWIndex.load(path / "index.npz", mmap=True)
         info = json.loads((path / "records.json").read_text())
         seg = cls(seg_id, path, index, info["ids"], info["metas"])
         for label in tombstones:
