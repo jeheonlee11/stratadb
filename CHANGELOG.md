@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - `neighbors(filter=...)` keeps only neighbours whose metadata or node
   properties match; `graph_rels=[...]` limits which relation types
