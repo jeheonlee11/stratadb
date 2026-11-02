@@ -14,6 +14,7 @@ def make(tmp_path, **kw):
     # background and planner paths have their own tests.
     kw.setdefault("background_seal", False)
     kw.setdefault("auto_compact", False)
+    kw.setdefault("build_processes", 0)
     kw.setdefault("exact_search_limit", 0)
     return Collection(tmp_path / "c", CollectionConfig(dim=16, **kw))
 

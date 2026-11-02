@@ -60,10 +60,23 @@ and a new growing segment takes its place. A worker thread builds the HNSW
 index while the frozen segment keeps answering queries by brute force. Writes
 are never blocked by an index build.
 
+Several segments can be in this state at once. Each build runs in a worker
+**process** (`build_processes`, default 2) so it uses its own CPU core instead
+of sharing the main process's GIL; a bulk load that seals four segments
+builds them four-wide. Workers start with `spawn`, never `fork`: the main
+process runs background threads holding locks, and a forked child would
+inherit those locks in a held state. Segments under
+`build_process_min_records` build in-process, since starting a worker costs
+about a second. If a worker can't start at all (spawn re-imports `__main__`,
+which fails under a REPL, a notebook or `python -`), the collection notes it
+and builds in-process from then on; nothing is lost either way.
+
 **Sealed.** The built segment is written to `seg-N/` (index + records) via a
 temporary directory and an atomic rename, then swapped in. Deletes and
 overwrites that hit the frozen segment during the build are reconciled at
-swap time by tombstoning those ids in the new segment.
+swap time by tombstoning those ids in the new segment. A frozen record is
+located by its *future* segment id, so installing the built segment changes
+no locator entries: the id simply starts resolving to the sealed segment.
 
 Sealed segments are immutable. Deleting a record adds a tombstone; the graph
 still routes through tombstoned nodes but never returns them. `compact()`

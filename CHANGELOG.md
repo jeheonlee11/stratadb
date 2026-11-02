@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Parallel index builds**: segments build in worker processes
+  (`build_processes`, default 2), several at a time, so bulk loads use
+  multiple cores. Falls back to in-process builds where workers can't start.
 - `search_many`: batch queries in one call, embedded and over HTTP.
 - `update_metadata` (merge or replace, without resending vectors),
   `delete_where`, `count`, and id-ordered `scan` paging with `offset`.

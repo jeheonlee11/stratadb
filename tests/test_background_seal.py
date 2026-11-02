@@ -13,6 +13,7 @@ def rand(n, dim=16, seed=0):
 def make(tmp_path, **kw):
     kw.setdefault("seal_threshold", 200)
     kw.setdefault("background_seal", True)
+    kw.setdefault("build_processes", 0)  # tests monkeypatch SealedSegment.build
     return Collection(tmp_path / "c", CollectionConfig(dim=16, **kw))
 
 
@@ -82,7 +83,7 @@ def test_crash_during_build_loses_nothing(tmp_path, monkeypatch):
     # and let the thread finish before the test directory is removed.
     col._closed = True
     gate.release.set()
-    col._seal_thread.join(10)
+    col.wait_for_seal()
     reopened.close()
 
 

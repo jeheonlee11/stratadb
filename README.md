@@ -67,8 +67,9 @@ activation, so a weak, barely related match can't promote its neighbours.
 - **Durable writes**: CRC-framed write-ahead log with raw float32 vectors;
   torn or corrupt tails are detected and truncated on open.
 - **Segments**: writes land in a brute-force growing segment, which seals
-  into an HNSW-indexed segment **on a background thread** while staying
-  searchable. Deletes are tombstones; segments heavy with them are compacted
+  into an HNSW-indexed segment **in a background worker process** while
+  staying searchable. Several segments build at once, so bulk loads scale
+  with cores: 4 workers index 20k x 384 vectors 4x faster than one. Deletes are tombstones; segments heavy with them are compacted
   automatically in the background (the rebuild runs outside the lock, so
   reads and writes never wait for it).
 - **Crash recovery**: generation-numbered snapshots plus an atomically
@@ -188,7 +189,9 @@ Set per collection at creation (`create_collection(name, dim, **options)`):
 | `m` / `ef_construction` | 16 / 128 | HNSW graph degree and build-time beam width |
 | `ef_search` | 64 | default query beam width (override per query with `ef=`) |
 | `seal_threshold` | 16384 | growing-segment size that triggers a seal |
-| `background_seal` | `True` | build indexes on a worker thread |
+| `background_seal` | `True` | build indexes in the background instead of blocking the write |
+| `build_processes` | 2 | worker processes for index builds (and how many build at once); 0 = in-process |
+| `build_process_min_records` | 2000 | smaller segments build in-process (a worker costs ~1 s to start) |
 | `exact_search_limit` | 3,000,000 | segments with records x dim at or under this are scanned exactly |
 | `sync` | `flush` | WAL durability: `always` (fsync), `flush`, `never` |
 | `wal_checkpoint_bytes` | 64 MB | checkpoint when the WAL grows past this |
@@ -214,9 +217,28 @@ queries, recall against exact cosine top-10
 | exact scan (planner's small-segment path) | 1.000 | 6.8 ms | 8.6 ms |
 
 - Writes are acknowledged at about **260,000 vectors/s** (WAL append + growing
-  segment); the HNSW index for those 20k vectors is ready about 40 s later,
-  built in the background.
+  segment). Index builds run in worker processes, several at a time
+  (`seal_threshold=5000`, so four segments):
+
+  | `build_processes` | 20k x 384 indexed in |
+  |---|---|
+  | 0 (in-process) | 30.0 s |
+  | 2 | 15.3 s |
+  | 4 | **7.6 s** |
 - On disk: 33 MB for 20k x 384 vectors with index. Reopening takes under 0.1 s.
+
+**Scaling to 100k vectors** (embedding-like synthetic data, 384 dims,
+`bench/ann_bench.py --data manifold --n 100000`):
+
+| segments | recall@10 (ef=64 / 128) | p50 (ef=64 / 128) | build | disk |
+|---|---|---|---|---|
+| 7 x 16k (`seal_threshold=16384`, default) | 0.987 / **0.999** | 8.8 ms / 15.6 ms | 225 s | 169 MB |
+| 2 x 50k (`seal_threshold=50000`) | 0.934 / 0.986 | **2.7 ms / 4.7 ms** | 256 s | 169 MB |
+
+A query walks every segment's graph, so fewer, larger segments are about 3x
+faster per query; smaller segments give higher recall at the same `ef` and
+cheaper, more frequent background builds. Pick `seal_threshold` for the
+workload: large for read-heavy, small for write-heavy.
 
 **Filtered search with secondary indexes** (same 20k vectors, `index_fields=["src", "year"]`):
 
@@ -258,7 +280,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 120 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 124 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random
@@ -271,8 +293,9 @@ weren't atomic.)
 
 - One process per collection directory (enforced with a lock file).
 - Each collection is held in memory.
-- Index builds are pure Python, roughly 500-1,000 vectors/second at 384 dims
-  (in the background, so they don't block writes).
+- Index builds are pure Python, roughly 700 vectors/second per core at 384
+  dims; they run in background worker processes, so they don't block writes
+  and scale with cores.
 
 ## License
 

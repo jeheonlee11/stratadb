@@ -40,7 +40,8 @@ from .wal import WriteAheadLog
 log = logging.getLogger("stratadb")
 
 GROWING = -1  # locator value: record lives in the growing segment
-FROZEN = -2   # locator value: record lives in the segment being sealed
+# A record being sealed is located by its future segment id; _segment() checks
+# the in-progress (frozen) segments before the sealed ones.
 
 
 @dataclass
@@ -56,6 +57,12 @@ class CollectionConfig:
     compact_deleted_ratio: float = 0.3
     # Build segment indexes on a worker thread instead of blocking writes.
     background_seal: bool = True
+    # Build indexes in worker processes (one per concurrent build) so builds
+    # use other CPU cores instead of sharing this process's GIL. Only segments
+    # with at least build_process_min_records go to a worker: starting one
+    # costs about a second, which small segments don't repay.
+    build_processes: int = 2
+    build_process_min_records: int = 2000
     # Segments with (live records x dim) at or below this are scanned exactly:
     # a single matrix product beats a Python graph walk at that size.
     exact_search_limit: int = 3_000_000
@@ -110,10 +117,12 @@ class Collection:
         self._checkpoint_lsn = 0
         self._files: dict[str, str] = {}
         self._generation = 0
-        self.frozen: GrowingSegment | None = None
-        self._seal_thread: threading.Thread | None = None
+        self.frozen: dict[int, GrowingSegment] = {}   # seg_id -> segment being indexed
+        self._seal_threads: dict[int, threading.Thread] = {}
         self._seal_error: Exception | None = None
         self._compact_thread: threading.Thread | None = None
+        self._pool = None
+        self._pool_broken = False
         self._compacting: set[int] = set()
         self.text_index: BM25Index | None = BM25Index() if self.config.text_field else None
         self.meta_index: MetaIndex | None = MetaIndex(self.config.index_fields) if self.config.index_fields else None
@@ -227,8 +236,9 @@ class Collection:
     def _segment(self, where: int):
         if where == GROWING:
             return self.growing
-        if where == FROZEN:
-            return self.frozen
+        frozen = self.frozen.get(where)
+        if frozen is not None:
+            return frozen
         return self.sealed[where]
 
     def _remove_location(self, rid: str) -> bool:
@@ -468,7 +478,7 @@ class Collection:
                     if found is not None and (exact or pred(found[1])):
                         matched.append((rid, found[1]))
             else:
-                segments = [self.growing, *([self.frozen] if self.frozen is not None else []),
+                segments = [self.growing, *self.frozen.values(),
                             *self.sealed.values()]
                 matched = [(rid, meta) for seg in segments for rid, _, meta in seg.records()
                            if pred is None or pred(meta)]
@@ -530,8 +540,8 @@ class Collection:
             seg_pred = None if exact else pred  # exact index answers need no re-check
             if q is not None:
                 hits = self.growing.search(q, pool_k, seg_pred, cands)
-                if self.frozen is not None:
-                    hits.extend(self.frozen.search(q, pool_k, seg_pred, cands))
+                for frozen in self.frozen.values():
+                    hits.extend(frozen.search(q, pool_k, seg_pred, cands))
                 for seg in self.sealed.values():
                     hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=seg_pred,
                                            exact_limit=self.config.exact_search_limit, candidates=cands))
@@ -678,12 +688,13 @@ class Collection:
 
         With ``background_seal`` (the default) the index builds on a worker
         thread: writes go to a fresh growing segment and the frozen one is still
-        searched by brute force until the indexed segment is swapped in. Only
-        one build runs at a time; a second seal waits for the first.
+        searched by brute force until the indexed segment is swapped in. Up to
+        ``build_processes`` builds run at once (each in its own worker process);
+        without worker processes, one at a time.
         """
         background = self.config.background_seal if wait is None else not wait
         self._check_open()
-        self.wait_for_seal()
+        self._wait_for_build_slot()
         with self._lock:
             self._check_open()
             if not len(self.growing) or (only_if_full and not self._growing_full):
@@ -698,26 +709,55 @@ class Collection:
                 for i, (rid, vec, meta) in enumerate(frozen.records()):
                     (chunk if i < self.config.seal_threshold else rest).put(rid, vec, meta)
                 frozen = chunk
-            self.frozen = frozen
+            self.frozen[seg_id] = frozen
             for rid in frozen.pos:
-                self.locator[rid] = FROZEN
+                self.locator[rid] = seg_id
             records = [(rid, vec.copy(), meta) for rid, vec, meta in frozen.records()]
             if background:
-                self._seal_thread = threading.Thread(
+                thread = threading.Thread(
                     target=self._build_and_install, args=(seg_id, frozen, records),
                     name=f"stratadb-seal-{self.name}-{seg_id}", daemon=True,
                 )
-                self._seal_thread.start()
+                self._seal_threads[seg_id] = thread
+                thread.start()
                 return seg_id
         self._build_and_install(seg_id, frozen, records)
         return seg_id
 
+    def _build_segment(self, seg_id: int, records) -> SealedSegment:
+        """Build a sealed segment, in a worker process when configured."""
+        args = (seg_id, self.path / f"seg-{seg_id}", records,
+                self.config.metric, self.config.m, self.config.ef_construction)
+        pool = self._executor() if len(records) >= self.config.build_process_min_records else None
+        if pool is not None:
+            try:
+                return SealedSegment.build_in_process(*args, pool)
+            except Exception:  # noqa: BLE001 - worker died (e.g. spawn can't re-import __main__)
+                log.warning("worker-process build failed for %s; building in-process instead",
+                            self.name, exc_info=True)
+                self._pool = None
+                self._pool_broken = True
+        return SealedSegment.build(*args)
+
+    def _executor(self):
+        if self.config.build_processes <= 0 or self._pool_broken:
+            return None
+        if self._pool is None:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+
+            # spawn, never fork: this process runs background threads holding
+            # locks, and a fork would copy those locks in a held state and
+            # deadlock the worker. spawn re-imports __main__, which fails under
+            # a REPL, notebook or `python -`; that case falls back to
+            # in-process builds (see _build_segment).
+            self._pool = ProcessPoolExecutor(max_workers=self.config.build_processes,
+                                             mp_context=multiprocessing.get_context("spawn"))
+        return self._pool
+
     def _build_and_install(self, seg_id: int, frozen: GrowingSegment, records) -> None:
         try:
-            segment = SealedSegment.build(
-                seg_id, self.path / f"seg-{seg_id}", records,
-                self.config.metric, self.config.m, self.config.ef_construction,
-            )
+            segment = self._build_segment(seg_id, records)
         except Exception as e:  # noqa: BLE001 - keep the data searchable, surface the error
             log.exception("sealing segment %s of %s failed", seg_id, self.name)
             with self._lock:
@@ -726,27 +766,43 @@ class Collection:
                     if rid not in self.growing.pos:
                         self.growing.put(rid, vec, meta)
                         self.locator[rid] = GROWING
-                self.frozen = None
+                self.frozen.pop(seg_id, None)
             return
         with self._lock:
             # Records deleted or overwritten while the index was building left
             # the frozen segment; tombstone them in the new one.
             for rid in list(segment.pos):
-                if rid in frozen.pos:
-                    self.locator[rid] = seg_id
-                else:
+                if rid not in frozen.pos:
                     segment.delete(rid)
+            # Live records already locate to seg_id; it now resolves to the
+            # sealed segment instead of the frozen one.
             self.sealed[seg_id] = segment
-            self.frozen = None
+            self.frozen.pop(seg_id, None)
             self._seal_error = None
             if not self._closed:
                 self.checkpoint()
 
     def wait_for_seal(self) -> None:
-        """Block until a background seal (if any) has finished."""
-        thread = self._seal_thread
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join()
+        """Block until every background seal has finished."""
+        me = threading.current_thread()
+        for thread in list(self._seal_threads.values()):
+            if thread.is_alive() and thread is not me:
+                thread.join()
+        self._seal_threads = {sid: t for sid, t in self._seal_threads.items() if t.is_alive()}
+
+    def _max_concurrent_builds(self) -> int:
+        if self.config.build_processes > 0 and not self._pool_broken:
+            return self.config.build_processes
+        return 1  # in-process builds share the GIL; running several gains nothing
+
+    def _wait_for_build_slot(self) -> None:
+        me = threading.current_thread()
+        while True:
+            alive = [t for t in self._seal_threads.values() if t.is_alive() and t is not me]
+            if len(alive) < self._max_concurrent_builds():
+                self._seal_threads = {sid: t for sid, t in self._seal_threads.items() if t.is_alive()}
+                return
+            alive[0].join()
 
     def compact(self, wait: bool = True) -> dict:
         """Rewrite sealed segments that are mostly tombstones, and merge small ones.
@@ -785,11 +841,7 @@ class Collection:
 
     def _compact_build(self, victim_ids: list[int], chunks) -> dict:
         try:
-            built = [
-                SealedSegment.build(seg_id, self.path / f"seg-{seg_id}", chunk,
-                                    self.config.metric, self.config.m, self.config.ef_construction)
-                for seg_id, chunk in chunks
-            ]
+            built = [self._build_segment(seg_id, chunk) for seg_id, chunk in chunks]
         except Exception as e:  # noqa: BLE001 - old segments stay in place; nothing is lost
             log.exception("compacting %s failed", self.name)
             with self._lock:
@@ -846,7 +898,7 @@ class Collection:
             }
             # A segment being sealed in the background isn't on disk yet, so its
             # records go into the growing snapshot too.
-            records = list(self.frozen.records()) if self.frozen is not None else []
+            records = [r for frozen in self.frozen.values() for r in frozen.records()]
             records += list(self.growing.records())
             save_records(records, self.config.dim, self.path / files["growing"][0], self.path / files["growing"][1])
             atomic_write_json(self.path / files["graph"], self.graph.to_json())
@@ -905,7 +957,7 @@ class Collection:
                 "dim": self.config.dim,
                 "metric": self.config.metric,
                 "growing": len(self.growing),
-                "sealing": len(self.frozen) if self.frozen is not None else 0,
+                "sealing": sum(len(f) for f in self.frozen.values()),
                 "sealed_segments": [
                     {"id": sid, "live": len(s), "total": s.total, "deleted_ratio": round(s.deleted_ratio, 3)}
                     for sid, s in sorted(self.sealed.items())
@@ -928,3 +980,6 @@ class Collection:
             self.wal.close()
             self._closed = True
             self._dir_lock.release()
+        if self._pool is not None:
+            self._pool.shutdown(wait=False)
+            self._pool = None

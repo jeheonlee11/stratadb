@@ -139,6 +139,28 @@ class GrowingSegment:
         return seg
 
 
+def build_segment_files(path: Path, vectors: np.ndarray, ids: list[str], metas: list[dict],
+                        metric: str, m: int, ef_construction: int) -> None:
+    """Build an HNSW index over ``vectors`` and write the segment directory.
+
+    Module-level so it can run in a worker process. Writes into a temporary
+    sibling directory and renames it into place, so a crash leaves either the
+    old segment or none.
+    """
+    path = Path(path)
+    index = HNSWIndex(vectors.shape[1], metric=metric, m=m, ef_construction=ef_construction,
+                      capacity=max(1, len(vectors)))
+    for vec in vectors:
+        index.add(vec)
+    tmp = path.with_name(path.name + ".building")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    index.save(tmp / "index.npz")
+    atomic_write_json(tmp / "records.json", {"ids": ids, "metas": metas})
+    shutil.rmtree(path, ignore_errors=True)
+    os.replace(tmp, path)
+
+
 class SealedSegment:
     def __init__(self, seg_id: int, path: Path, index: HNSWIndex, ids: list[str], metas: list[dict]):
         self.seg_id = seg_id
@@ -173,20 +195,22 @@ class SealedSegment:
         m: int,
         ef_construction: int,
     ) -> "SealedSegment":
-        dim = len(records[0][1])
-        index = HNSWIndex(dim, metric=metric, m=m, ef_construction=ef_construction, capacity=len(records))
-        for _, vec, _ in records:
-            index.add(vec)
         ids = [rid for rid, _, _ in records]
         metas = [meta for _, _, meta in records]
-        tmp = path.with_name(path.name + ".building")
-        shutil.rmtree(tmp, ignore_errors=True)
-        tmp.mkdir(parents=True)
-        index.save(tmp / "index.npz")
-        atomic_write_json(tmp / "records.json", {"ids": ids, "metas": metas})
-        shutil.rmtree(path, ignore_errors=True)
-        os.replace(tmp, path)
-        return cls(seg_id, path, index, ids, metas)
+        vectors = np.stack([vec for _, vec, _ in records])
+        build_segment_files(path, vectors, ids, metas, metric, m, ef_construction)
+        return cls.load(seg_id, path, [])
+
+    @classmethod
+    def build_in_process(cls, seg_id, path, records, metric, m, ef_construction, pool) -> "SealedSegment":
+        """Like ``build`` but the index is built in a worker process from ``pool``
+        (a ``concurrent.futures`` executor), so it uses another CPU core and
+        never contends for this process's GIL."""
+        ids = [rid for rid, _, _ in records]
+        metas = [meta for _, _, meta in records]
+        vectors = np.stack([vec for _, vec, _ in records])
+        pool.submit(build_segment_files, path, vectors, ids, metas, metric, m, ef_construction).result()
+        return cls.load(seg_id, path, [])
 
     @classmethod
     def load(cls, seg_id: int, path: Path, tombstones: list[int]) -> "SealedSegment":
