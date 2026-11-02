@@ -33,11 +33,15 @@ collections; each has its own WAL, segments and lock.
 
 1. Validate the batch (shape, finite values, metadata length). Duplicate ids
    inside one batch keep the last occurrence.
-2. Append one WAL entry for the batch. The header (ids, metadata) is JSON;
-   vectors follow as raw float32 bytes, so a 768-dim batch is not inflated
-   into JSON text.
+2. Append **one** WAL entry for the whole batch. The header (ids, metadata)
+   is JSON; vectors follow as raw float32 bytes, so a 768-dim batch is not
+   inflated into JSON text. One entry per batch makes every batch atomic: a
+   crash keeps all of it or none of it.
 3. Apply in memory: remove the id from wherever it currently lives (growing,
    frozen or a sealed segment's tombstones) and put it in the growing segment.
+4. If the growing segment is now over `seal_threshold`, seal threshold-sized
+   chunks one after another (a big batch may overshoot the threshold; it is
+   never split across WAL entries).
 
 The WAL frame is `u32 length | u32 crc32 | payload`. On open, StrataDB scans
 the log and truncates at the first frame that is short or fails its CRC: a
@@ -126,9 +130,15 @@ exceeds `wal_checkpoint_bytes`, and on `close()`.
 ## Graph layer
 
 Edges are `(src, rel, dst)` with a float weight and a properties dict, stored
-in an adjacency map with a reverse index. They are logged in the WAL and
-snapshotted with each checkpoint. An edge may reference an id that doesn't
-exist (yet); deleting a record removes every edge touching it.
+in an adjacency map with a reverse index. Nodes can also carry a property
+dict of their own. Both are logged in the WAL and snapshotted with each
+checkpoint. An edge may reference an id that doesn't exist (yet); deleting an
+id removes its vector record, its node properties and every edge touching it.
+
+A collection created with `dim=0` is graph-only: it has no vectors at all,
+just nodes and edges. That is what LightRAG-style systems need for their
+entity/relation graph, and it shares the same WAL, checkpoint and recovery
+machinery as vector collections.
 
 Search can use the graph in two ways.
 
@@ -151,6 +161,42 @@ This is what lets a question about "battery manufacturers' employees" return
 the people linked to battery companies even when the people's own text never
 mentions batteries (`examples/graph_retrieval.py`).
 
+## Keyword and hybrid search
+
+A collection created with `text_field="..."` keeps a BM25 index (`k1=1.2`,
+`b=0.75`) over that metadata field. The tokenizer keeps identifiers like
+`e1042`, `wal.log` and `torn-write` whole, because exact tokens are where
+keyword search beats embeddings. The index is derived state: it is updated on
+every write and rebuilt from the records when the collection opens, so it
+needs no files of its own.
+
+`search(vector, text=...)` runs both searches over a candidate pool of
+`max(4k, 32)` and merges the two rankings with reciprocal rank fusion
+(`score = sum of 1 / (60 + rank)`), which needs no score calibration between
+cosine similarity and BM25. Metadata filters apply to both sides.
+
+## Backups
+
+`backup(dest)` waits for any background seal, checkpoints, and copies exactly
+the files the manifest references while holding the lock. The copy is a
+point-in-time snapshot with an empty WAL that opens like any collection;
+writes resume as soon as the copy finishes.
+
+## Testing strategy
+
+Beyond unit tests for each module, two kinds of tests check behaviour against
+an independent model:
+
+- **Crash-recovery fuzzing** (`tests/test_recovery_fuzz.py`): random
+  histories of upserts, deletes, edge and node writes, seals and checkpoints
+  are mirrored in a plain-Python model. The WAL of a copy is cut at a random
+  byte offset, the copy is reopened, and its state must equal the model after
+  some prefix of the operations no older than the last checkpoint. This found
+  that batches crossing the seal threshold weren't atomic (fixed by logging
+  one entry per batch).
+- **Recall against exact search** for every metric, and against hnswlib for
+  index quality (see the README benchmarks).
+
 ## Concurrency
 
 One re-entrant lock per collection guards all state. Reads and writes are
@@ -164,4 +210,5 @@ only to install the finished segment. The HTTP server is a
   second process fail fast instead of corrupting the WAL.
 - Everything for a collection is held in memory.
 - The server has bearer-token auth only; put it behind TLS if it leaves
-  localhost.
+  localhost. The web console page itself is served without auth; every API
+  call it makes needs the key.
