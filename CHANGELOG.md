@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0
 
 - `GET /metrics` in Prometheus text format: per-collection gauges (records,
   edges, nodes, WAL bytes, segments) and request/latency counters by action.
