@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - JSONL export/import (`export_jsonl` / `import_jsonl`, `stratadb export|import`).
 - Sealed segments' vectors are memory-mapped on reopen (stored in a separate
