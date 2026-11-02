@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `search_many`: batch queries in one call, embedded and over HTTP.
 - `update_metadata` (merge or replace, without resending vectors),
   `delete_where`, `count`, and id-ordered `scan` paging with `offset`.
 - **Background auto-compaction**: segments past `compact_deleted_ratio` are

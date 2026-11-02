@@ -583,6 +583,19 @@ class Collection:
                 results.append(res)
             return results
 
+    def search_many(self, vectors, k: int = 10, **kwargs) -> list[list[dict]]:
+        """Run one search per row of ``vectors`` (same options for all).
+
+        Everything the single-query search does, including filters, hybrid
+        text (one string for all rows) and graph_boost, applies to each row.
+        """
+        vecs = np.asarray(vectors, dtype=np.float32)
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+        if vecs.ndim != 2:
+            raise ValueError("vectors must be a 2-D array of query vectors")
+        return [self.search(row, k, **kwargs) for row in vecs]
+
     def _graph_rerank(self, q, scored, alpha, pred):
         """Spreading activation over the edge graph.
 

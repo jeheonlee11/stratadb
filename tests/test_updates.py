@@ -52,3 +52,15 @@ def test_delete_where_count_and_paging(tmp_path):
         col.delete_where({})
     with pytest.raises(ValueError):
         col.scan(offset=-1)
+
+
+def test_search_many_matches_single_searches(tmp_path):
+    col = make(tmp_path)
+    vecs = seed(col)
+    batch = col.search_many(vecs[:5], k=3, filter={"tag": "even"})
+    assert len(batch) == 5
+    for row, q in zip(batch, vecs[:5]):
+        assert row == col.search(q, 3, filter={"tag": "even"})
+    assert col.search_many(vecs[0], k=1)[0][0]["id"] == "r00"
+    with pytest.raises(ValueError):
+        col.search_many(np.zeros((2, 2, 8)))

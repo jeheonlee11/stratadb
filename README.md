@@ -22,6 +22,7 @@ kb.search(q, k=5, filter={"year": {"$gte": 2020}})        # with metadata filter
 kb.search(q, k=5, expand_hops=1)                          # attach each hit's neighbourhood
 kb.search(q, k=5, graph_boost=0.4)                        # re-rank by spreading activation over edges
 kb.search(q, text="E1042 checksum", k=5)                  # hybrid: vector + BM25 keyword, fused
+kb.search_many(queries, k=5)                               # many queries, one call
 ```
 
 ## Why graph-native
@@ -161,6 +162,7 @@ notes.search(query, k=5, graph_boost=0.3)
 | GET / POST | `/collections` | `{name, dim, metric?, ...options}` |
 | GET / DELETE | `/collections/<name>` | |
 | POST | `/collections/<name>/upsert` | `{ids, vectors, metadata?}` |
+| POST | `/collections/<name>/search_many` | `{vectors, k?, ...same options}` |
 | POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
 | POST | `/collections/<name>/get` · `delete` · `scan` · `count` | `{ids}` / `{ids}` / `{filter?, limit?, offset?}` / `{filter?}` |
 | POST | `/collections/<name>/update` · `delete_where` | `{ids, patch, replace?}` / `{filter}` |
@@ -256,7 +258,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 118 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 120 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

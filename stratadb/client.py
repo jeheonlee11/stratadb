@@ -84,6 +84,10 @@ class RemoteCollection:
                 "text": text}
         return self._post("search", body)["hits"]
 
+    def search_many(self, vectors, k: int = 10, **kwargs) -> list[list[dict]]:
+        body = {"vectors": _jsonable(vectors), "k": k, **kwargs}
+        return self._post("search_many", body)["results"]
+
     def scan(self, filter=None, limit=None, offset: int = 0) -> list[dict]:
         return self._post("scan", {"filter": filter, "limit": limit, "offset": offset})["records"]
 

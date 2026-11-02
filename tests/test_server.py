@@ -122,3 +122,11 @@ def test_update_count_delete_where_endpoints(server):
     assert [r["id"] for r in col.scan(limit=1, offset=1)] == ["b"]
     assert col.delete_where({"k": {"$gte": 3}}) == 2
     assert col.count() == 1
+
+
+def test_search_many_endpoint(server):
+    client = Client(server, api_key="secret")
+    col = client.create_collection("m", dim=4)
+    col.upsert(["a", "b", "c"], np.eye(4)[:3])
+    rows = col.search_many(np.eye(4)[:2], k=1)
+    assert [r[0]["id"] for r in rows] == ["a", "b"]
