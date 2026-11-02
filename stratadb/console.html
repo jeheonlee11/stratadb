@@ -227,10 +227,34 @@ function showTab(tab) {
     panel.innerHTML = `
       <div class="row"><input id="node" placeholder="node or record id" style="flex:1;min-width:160px">
         <label>hops <select id="hops"><option>1</option><option selected>2</option></select></label>
-        <button id="run">Explore</button></div>
+        <button id="run">Explore</button>
+        <button class="ghost" id="rank">Top by PageRank</button>
+        <button class="ghost" id="comps">Components</button></div>
       <div id="graph" style="margin-top:10px"></div>`;
     $("#run").onclick = () => explore($("#node").value.trim());
     $("#node").addEventListener("keydown", e => { if (e.key === "Enter") explore($("#node").value.trim()); });
+    $("#rank").onclick = async () => {
+      const box = $("#graph");
+      try {
+        const seed = $("#node").value.trim();
+        const {ranking} = await api("POST", `/collections/${encodeURIComponent(current)}/pagerank`,
+          {top: 25, seeds: seed ? [seed] : null});
+        box.innerHTML = `<p class="muted">${seed ? `Personalized PageRank around ${esc(seed)}` : "PageRank over the whole graph"}: top ${ranking.length}.</p>` +
+          `<div class="scroll"><table><tr><th>#</th><th>node</th><th>score</th></tr>${ranking.map(([id, score], i) =>
+            `<tr><td class="num">${i + 1}</td><td class="id"><span class="link" data-id="${esc(id)}">${esc(id)}</span></td><td class="num">${score.toFixed(4)}</td></tr>`).join("")}</table></div>`;
+        box.querySelectorAll(".link[data-id]").forEach(a => a.addEventListener("click", () => { $("#node").value = a.dataset.id; explore(a.dataset.id); }));
+      } catch (e) { box.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    };
+    $("#comps").onclick = async () => {
+      const box = $("#graph");
+      try {
+        const {components} = await api("POST", `/collections/${encodeURIComponent(current)}/components`);
+        box.innerHTML = `<p class="muted">${components.length} connected component(s), largest first.</p>` +
+          `<div class="scroll"><table><tr><th>size</th><th>members</th></tr>${components.slice(0, 50).map(c =>
+            `<tr><td class="num">${c.length}</td><td class="meta">${c.slice(0, 12).map(id => `<span class="link" data-id="${esc(id)}">${esc(id)}</span>`).join(", ")}${c.length > 12 ? `, … (${c.length - 12} more)` : ""}</td></tr>`).join("")}</table></div>`;
+        box.querySelectorAll(".link[data-id]").forEach(a => a.addEventListener("click", () => { $("#node").value = a.dataset.id; explore(a.dataset.id); }));
+      } catch (e) { box.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+    };
   }
 }
 

@@ -174,7 +174,8 @@ notes.search(query, k=5, graph_boost=0.3)
 
 Open `http://127.0.0.1:7700/` for the **web console**: browse collections and their stats,
 run filtered scans and keyword searches, find records similar to any stored record (using its
-own vector, so no embedding model is needed), and explore the graph around a node.
+own vector, so no embedding model is needed), explore the graph around a node, and rank
+nodes by PageRank or list connected components.
 
 Maintenance from the shell: `stratadb stats|compact|checkpoint --path ./data [collection]`, and
 `stratadb backup --path ./data --out ./backup` for a consistent online copy.

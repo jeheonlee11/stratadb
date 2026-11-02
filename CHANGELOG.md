@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Console: PageRank ranking and connected components in the Graph tab.
+
 ## 0.3.0
 
 - **Parallel index builds**: segments build in worker processes
