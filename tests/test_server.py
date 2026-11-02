@@ -148,3 +148,37 @@ def test_tune_ef_endpoint(server):
     col.upsert([f"r{i}" for i in range(200)], np.random.default_rng(3).normal(size=(200, 8)))
     res = col.tune_ef(target_recall=0.8, samples=10)
     assert res["recall"] >= 0.8 and res["samples"] == 10
+
+
+def test_sigterm_closes_database_cleanly(tmp_path):
+    import os
+    import signal
+    import socket
+    import subprocess
+    import sys
+    import time
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen([sys.executable, "-m", "stratadb", "serve", "--path", str(tmp_path / "db"),
+                             "--port", str(port)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        client = Client(f"http://127.0.0.1:{port}")
+        for _ in range(100):
+            try:
+                client.health(); break
+            except Exception:  # noqa: BLE001 - server still starting
+                time.sleep(0.1)
+        col = client.create_collection("s", dim=4)
+        col.upsert(["a", "b"], np.eye(4)[:2])
+        os.kill(proc.pid, signal.SIGTERM)
+        out, _ = proc.communicate(timeout=20)
+        assert proc.returncode == 0, out
+        assert "SIGTERM" in out and "closed" in out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    reopened = Database(tmp_path / "db")["s"]
+    assert len(reopened) == 2 and reopened.replayed_entries == 0   # checkpointed on shutdown
+    reopened.close()

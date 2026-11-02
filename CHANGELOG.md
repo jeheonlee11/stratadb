@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `stratadb serve` shuts down cleanly on SIGTERM as well as Ctrl-C: final
+  checkpoint, nothing to replay on the next start.
 - Console: Maintenance tab (checkpoint, compact, merge, tune ef).
 
 ## 0.6.0

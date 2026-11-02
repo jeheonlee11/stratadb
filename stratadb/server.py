@@ -253,13 +253,24 @@ def make_server(db: Database, host: str = "127.0.0.1", port: int = 7700, api_key
 
 
 def serve(path: str, host: str = "127.0.0.1", port: int = 7700, api_key: str | None = None) -> None:
+    import signal
+    import threading
+
     db = Database(path)
     server = make_server(db, host, port, api_key)
     log.warning("StrataDB %s serving %s on http://%s:%d", __version__, path, host, server.server_port)
+
+    # SIGTERM (docker stop, systemd) and SIGINT both stop the server loop so
+    # the database closes cleanly: a final checkpoint, nothing to replay later.
+    def stop(signum, frame):
+        log.warning("signal %s: shutting down", signal.Signals(signum).name)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, stop)
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        pass
     finally:
         server.server_close()
         db.close()
+        log.warning("closed %s", path)
