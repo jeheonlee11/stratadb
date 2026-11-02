@@ -84,8 +84,17 @@ class RemoteCollection:
                 "text": text}
         return self._post("search", body)["hits"]
 
-    def scan(self, filter=None, limit=None) -> list[dict]:
-        return self._post("scan", {"filter": filter, "limit": limit})["records"]
+    def scan(self, filter=None, limit=None, offset: int = 0) -> list[dict]:
+        return self._post("scan", {"filter": filter, "limit": limit, "offset": offset})["records"]
+
+    def count(self, filter=None) -> int:
+        return self._post("count", {"filter": filter})["count"]
+
+    def update_metadata(self, ids, patch: dict, replace: bool = False) -> int:
+        return self._post("update", {"ids": list(ids), "patch": patch, "replace": replace})["updated"]
+
+    def delete_where(self, filter: dict) -> int:
+        return self._post("delete_where", {"filter": filter})["deleted"]
 
     def link(self, edges: list[dict]) -> int:
         return self._post("link", {"edges": edges})["linked"]

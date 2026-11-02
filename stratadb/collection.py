@@ -275,15 +275,24 @@ class Collection:
             vecs = vecs[order]
             metadata = [metadata[i] for i in order] if metadata is not None else None
         vecs = prepare(vecs, self.config.metric)
-        # One WAL entry per batch, so a crash keeps all of it or none of it.
-        data = {"ids": ids, "metadata": metadata}
         with self._lock:
             self._check_open()
-            self.wal.append("upsert", data, vecs)
-            self._apply("upsert", data, vecs)
-            full = self._growing_full
-            if not full:
-                self._maybe_checkpoint()
+            full = self._write_upsert(ids, vecs, metadata)
+        self._after_upsert(full)
+        return len(ids)
+
+    def _write_upsert(self, ids: list[str], vecs: np.ndarray, metadata: list[dict] | None) -> bool:
+        """Log and apply one batch (caller holds the lock). Returns whether a seal is due."""
+        # One WAL entry per batch, so a crash keeps all of it or none of it.
+        data = {"ids": ids, "metadata": metadata}
+        self.wal.append("upsert", data, vecs)
+        self._apply("upsert", data, vecs)
+        full = self._growing_full
+        if not full:
+            self._maybe_checkpoint()
+        return full
+
+    def _after_upsert(self, full: bool) -> None:
         # A big batch seals into threshold-sized segments, one after another.
         # Sealing runs outside the lock: it may wait for a previous build.
         while full:
@@ -291,7 +300,54 @@ class Collection:
             with self._lock:
                 full = not self._closed and self._growing_full
         self._maybe_auto_compact()  # overwrites tombstone sealed records too
-        return len(ids)
+
+    def update_metadata(self, ids: Iterable[str], patch: dict, replace: bool = False) -> int:
+        """Change metadata without resending vectors.
+
+        Merges ``patch`` into each record's metadata (a ``None`` value removes
+        that key), or with ``replace=True`` makes ``patch`` the whole metadata.
+        Ids that don't exist are skipped. Returns how many records changed.
+
+        Implemented as an upsert of the stored vectors, so it is atomic, logged
+        and indexed exactly like any other write.
+        """
+        if not isinstance(patch, dict):
+            raise ValueError("patch must be an object")
+        self._require_vectors()
+        with self._lock:
+            self._check_open()
+            new_ids, vecs, metas = [], [], []
+            for rid in dict.fromkeys(str(r) for r in ids):
+                located = self._locate(rid)
+                if located is None:
+                    continue
+                vec, meta = located
+                if replace:
+                    merged = {k: v for k, v in patch.items() if v is not None}
+                else:
+                    merged = {**meta, **patch}
+                    merged = {k: v for k, v in merged.items() if v is not None}
+                new_ids.append(rid)
+                vecs.append(vec.copy())
+                metas.append(merged)
+            if not new_ids:
+                return 0
+            full = self._write_upsert(new_ids, np.stack(vecs), metas)
+        self._after_upsert(full)
+        return len(new_ids)
+
+    def delete_where(self, filter: dict) -> int:
+        """Delete every record matching ``filter`` (required: no accidental wipe)."""
+        if not filter:
+            raise ValueError("delete_where needs a non-empty filter")
+        ids = [r["id"] for r in self.scan(filter)]
+        return self.delete(ids) if ids else 0
+
+    def count(self, filter: dict | None = None) -> int:
+        if not filter:
+            with self._lock:
+                return len(self.locator)
+        return len(self.scan(filter))
 
     def delete(self, ids: Iterable[str]) -> int:
         ids = [str(i) for i in ids]
@@ -397,27 +453,28 @@ class Collection:
                 out.append(rec)
         return out
 
-    def scan(self, filter: dict | None = None, limit: int | None = None) -> list[dict]:
+    def scan(self, filter: dict | None = None, limit: int | None = None, offset: int = 0) -> list[dict]:
+        """Records matching ``filter``, in id order; page with ``offset`` / ``limit``."""
+        if offset < 0 or (limit is not None and limit < 0):
+            raise ValueError("offset and limit must be non-negative")
         pred = compile_filter(filter)
-        out = []
         with self._lock:
-            cands = self.meta_index.candidates(filter) if self.meta_index is not None and pred else None
+            cands, exact = (self.meta_index.plan(filter) if self.meta_index is not None and pred
+                            else (None, False))
             if cands is not None:
-                for rid in sorted(cands):
+                matched = []
+                for rid in cands:
                     found = self._locate(rid)
-                    if found is not None and pred(found[1]):
-                        out.append({"id": rid, "metadata": found[1]})
-                        if limit is not None and len(out) >= limit:
-                            break
-                return out
-            segments = [self.growing, *([self.frozen] if self.frozen is not None else []), *self.sealed.values()]
-            for seg in segments:
-                for rid, _, meta in seg.records():
-                    if pred is None or pred(meta):
-                        out.append({"id": rid, "metadata": meta})
-                        if limit is not None and len(out) >= limit:
-                            return out
-        return out
+                    if found is not None and (exact or pred(found[1])):
+                        matched.append((rid, found[1]))
+            else:
+                segments = [self.growing, *([self.frozen] if self.frozen is not None else []),
+                            *self.sealed.values()]
+                matched = [(rid, meta) for seg in segments for rid, _, meta in seg.records()
+                           if pred is None or pred(meta)]
+        matched.sort(key=lambda rm: rm[0])
+        end = None if limit is None else offset + limit
+        return [{"id": rid, "metadata": meta} for rid, meta in matched[offset:end]]
 
     def search(
         self,

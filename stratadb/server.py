@@ -12,7 +12,10 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/delete      {ids}
     POST   /collections/<name>/get         {ids, include_vectors?}
     POST   /collections/<name>/search      {vector? and/or text?, k?, filter?, ef?, include_vectors?, expand_hops?, graph_boost?}
-    POST   /collections/<name>/scan        {filter?, limit?}
+    POST   /collections/<name>/scan        {filter?, limit?, offset?}
+    POST   /collections/<name>/count       {filter?}
+    POST   /collections/<name>/update      {ids, patch, replace?}
+    POST   /collections/<name>/delete_where {filter}
     POST   /collections/<name>/link        {edges}
     POST   /collections/<name>/unlink      {edges}
     POST   /collections/<name>/neighbors   {id, hops?, rel?, direction?, limit?, hydrate?}
@@ -107,7 +110,11 @@ class Api:
                 "search": lambda: {"hits": col.search(
                     body.get("vector"), int(body.get("k", 10)),
                     **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text"))},
-                "scan": lambda: {"records": col.scan(body.get("filter"), body.get("limit"))},
+                "scan": lambda: {"records": col.scan(body.get("filter"), body.get("limit"), int(body.get("offset") or 0))},
+                "count": lambda: {"count": col.count(body.get("filter"))},
+                "update": lambda: (_require(body, "ids", "patch"), {"updated": col.update_metadata(
+                    body["ids"], body["patch"], bool(body.get("replace")))})[1],
+                "delete_where": lambda: (_require(body, "filter"), {"deleted": col.delete_where(body["filter"])})[1],
                 "link": lambda: (_require(body, "edges"), {"linked": col.link(body["edges"])})[1],
                 "unlink": lambda: (_require(body, "edges"), {"unlinked": col.unlink(body["edges"])})[1],
                 "neighbors": lambda: (_require(body, "id"), {"neighbors": col.neighbors(

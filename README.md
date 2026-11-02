@@ -118,6 +118,10 @@ with Database("./data") as db:
 
     hits = papers.search(np.random.rand(64), k=5, filter={"year": {"$gte": 2022}}, expand_hops=1)
     papers.neighbors("p2", hops=2, rel="cites", hydrate=True)
+    papers.update_metadata(["p2"], {"year": 2025, "draft": None})  # merge; None removes a key
+    papers.count({"year": {"$gte": 2022}})
+    papers.scan({"year": {"$gte": 2020}}, limit=50, offset=50)   # id order, paged
+    papers.delete_where({"year": {"$lt": 2015}})
     papers.delete(["p1"])                                       # also removes p1's edges
 
     # Hybrid search: index a metadata field for BM25 keyword matching
@@ -158,7 +162,8 @@ notes.search(query, k=5, graph_boost=0.3)
 | GET / DELETE | `/collections/<name>` | |
 | POST | `/collections/<name>/upsert` | `{ids, vectors, metadata?}` |
 | POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
-| POST | `/collections/<name>/get` · `delete` · `scan` | `{ids}` / `{ids}` / `{filter?, limit?}` |
+| POST | `/collections/<name>/get` · `delete` · `scan` · `count` | `{ids}` / `{ids}` / `{filter?, limit?, offset?}` / `{filter?}` |
+| POST | `/collections/<name>/update` · `delete_where` | `{ids, patch, replace?}` / `{filter}` |
 | POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
 | POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
 | POST | `/collections/<name>/path` · `pagerank` · `components` | `{src, dst, max_hops?}` / `{top?, seeds?}` / |
@@ -251,7 +256,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 115 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 118 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

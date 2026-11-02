@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `update_metadata` (merge or replace, without resending vectors),
+  `delete_where`, `count`, and id-ordered `scan` paging with `offset`.
 - **Background auto-compaction**: segments past `compact_deleted_ratio` are
   rewritten on a worker thread; compaction no longer holds the lock while
   rebuilding, and reconciles deletes/overwrites made during the build.

@@ -110,3 +110,15 @@ def test_graph_algorithm_endpoints(server):
     assert sorted(map(sorted, g.components())) == [["a", "b", "c"], ["x", "y"]]
     ranking = g.pagerank(top=2, seeds=["a"])
     assert len(ranking) == 2 and ranking[0][1] >= ranking[1][1]
+
+
+def test_update_count_delete_where_endpoints(server):
+    client = Client(server, api_key="secret")
+    col = client.create_collection("u", dim=4)
+    col.upsert(["a", "b", "c"], np.eye(4)[:3], [{"k": 1}, {"k": 2}, {"k": 3}])
+    assert col.update_metadata(["a"], {"k": 10}) == 1
+    assert col.get(["a"])[0]["metadata"] == {"k": 10}
+    assert col.count({"k": {"$gte": 3}}) == 2
+    assert [r["id"] for r in col.scan(limit=1, offset=1)] == ["b"]
+    assert col.delete_where({"k": {"$gte": 3}}) == 2
+    assert col.count() == 1
