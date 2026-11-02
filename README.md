@@ -240,10 +240,14 @@ queries, recall against exact cosine top-10
 **Scaling to 100k vectors** (embedding-like synthetic data, 384 dims,
 `bench/ann_bench.py --data manifold --n 100000`):
 
-| segments | recall@10 (ef=64 / 128) | p50 (ef=64 / 128) | build | disk |
+| segments | recall@10 (ef=64 / 128) | p50 (ef=64 / 128) | build (1 core / 4 workers) | disk |
 |---|---|---|---|---|
-| 7 x 16k (`seal_threshold=16384`, default) | 0.987 / **0.999** | 8.8 ms / 15.6 ms | 225 s | 169 MB |
-| 2 x 50k (`seal_threshold=50000`) | 0.934 / 0.986 | **2.7 ms / 4.7 ms** | 256 s | 169 MB |
+| 7 x 16k (`seal_threshold=16384`, default) | 0.987 / **0.999** | 8.8 ms / 15.6 ms | 225 s / **113 s** | 169 MB |
+| 2 x 50k (`seal_threshold=50000`) | 0.934 / 0.986 | **2.7 ms / 4.7 ms** | 256 s / – | 169 MB |
+
+Reopening the 100k collection takes 0.36 s (vectors are memory-mapped). With
+4 workers the 7 segments build in two rounds, so the speedup is 2x rather
+than 4x; more, smaller segments parallelize better.
 
 A query walks every segment's graph, so fewer, larger segments are about 3x
 faster per query; smaller segments give higher recall at the same `ef` and

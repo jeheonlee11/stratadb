@@ -60,6 +60,7 @@ def main():
     ap.add_argument("--efc", type=int, default=128)
     ap.add_argument("--efs", default="16,32,64,128,256")
     ap.add_argument("--data", choices=["manifold", "clustered"], default="manifold")
+    ap.add_argument("--procs", type=int, default=4, help="build_processes (worker processes for index builds)")
     ap.add_argument("--exact-limit", type=int, default=0,
                     help="segment exact-scan limit (records x dim); 0 forces the HNSW path")
     ap.add_argument("--out", default=None, help="write JSON results here")
@@ -75,12 +76,12 @@ def main():
     qunit = queries / np.linalg.norm(queries, axis=1, keepdims=True)
     truth = exact_topk(unit, qunit, args.k)
     tmp = Path(tempfile.mkdtemp(prefix="strata-bench-"))
-    results = {"data": args.data, "exact_limit": args.exact_limit, "n": args.n, "dim": args.dim, "queries": args.queries, "k": args.k, "m": args.m,
+    results = {"data": args.data, "build_processes": args.procs, "exact_limit": args.exact_limit, "n": args.n, "dim": args.dim, "queries": args.queries, "k": args.k, "m": args.m,
                "ef_construction": args.efc, "seal_threshold": args.seal}
     try:
         col = Collection(tmp / "bench", CollectionConfig(
             dim=args.dim, m=args.m, ef_construction=args.efc, seal_threshold=args.seal, sync="never",
-            exact_search_limit=args.exact_limit))
+            exact_search_limit=args.exact_limit, build_processes=args.procs))
         ids = [str(i) for i in range(args.n)]
         metas = [{"cluster": int(c), "even": i % 2 == 0} for i, c in enumerate(labels)]
         t0 = time.perf_counter()
