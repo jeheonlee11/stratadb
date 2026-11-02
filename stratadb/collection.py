@@ -694,34 +694,48 @@ class Collection:
         """
         background = self.config.background_seal if wait is None else not wait
         self._check_open()
-        self._wait_for_build_slot()
-        with self._lock:
-            self._check_open()
-            if not len(self.growing) or (only_if_full and not self._growing_full):
-                return None
-            seg_id = self._next_seg
-            self._next_seg += 1
-            frozen = self.growing
-            self.growing = GrowingSegment(self.config.dim, self.config.metric)
-            if len(frozen) > self.config.seal_threshold:
-                # Seal one threshold-sized chunk; the rest stays in growing.
-                chunk, rest = GrowingSegment(self.config.dim, self.config.metric), self.growing
-                for i, (rid, vec, meta) in enumerate(frozen.records()):
-                    (chunk if i < self.config.seal_threshold else rest).put(rid, vec, meta)
-                frozen = chunk
-            self.frozen[seg_id] = frozen
-            for rid in frozen.pos:
-                self.locator[rid] = seg_id
-            records = [(rid, vec.copy(), meta) for rid, vec, meta in frozen.records()]
-            if background:
-                thread = threading.Thread(
-                    target=self._build_and_install, args=(seg_id, frozen, records),
-                    name=f"stratadb-seal-{self.name}-{seg_id}", daemon=True,
-                )
-                self._seal_threads[seg_id] = thread
-                thread.start()
-                return seg_id
+        while True:
+            with self._lock:
+                self._check_open()
+                if not len(self.growing) or (only_if_full and not self._growing_full):
+                    return None
+                # Slot check and freeze happen under one lock hold, so the
+                # concurrency limit is exact and no thread registration is lost.
+                busy = self._live_seal_threads()
+                if len(busy) < self._max_concurrent_builds():
+                    return self._freeze_and_build(background)
+            busy[0].join()
+
+    def _freeze_and_build(self, background: bool) -> int:
+        """Caller holds the lock. Freeze the growing segment and start its build."""
+        seg_id = self._next_seg
+        self._next_seg += 1
+        frozen = self.growing
+        self.growing = GrowingSegment(self.config.dim, self.config.metric)
+        if len(frozen) > self.config.seal_threshold:
+            # Seal one threshold-sized chunk; the rest stays in growing.
+            chunk, rest = GrowingSegment(self.config.dim, self.config.metric), self.growing
+            for i, (rid, vec, meta) in enumerate(frozen.records()):
+                (chunk if i < self.config.seal_threshold else rest).put(rid, vec, meta)
+            frozen = chunk
+        self.frozen[seg_id] = frozen
+        for rid in frozen.pos:
+            self.locator[rid] = seg_id
+        records = [(rid, vec.copy(), meta) for rid, vec, meta in frozen.records()]
+        if background:
+            thread = threading.Thread(
+                target=self._build_and_install, args=(seg_id, frozen, records),
+                name=f"stratadb-seal-{self.name}-{seg_id}", daemon=True,
+            )
+            self._seal_threads[seg_id] = thread
+            thread.start()
+            return seg_id
+        # Synchronous build: release the lock while building, like a thread would.
+        self._lock.release()
+        try:
         self._build_and_install(seg_id, frozen, records)
+        finally:
+        self._lock.acquire()
         return seg_id
 
     def _build_segment(self, seg_id: int, records) -> SealedSegment:
@@ -782,27 +796,28 @@ class Collection:
             if not self._closed:
                 self.checkpoint()
 
+    def _live_seal_threads(self) -> list:
+        """Prune finished build threads in place (caller holds the lock) and
+        return the ones still running, excluding the calling thread."""
+        me = threading.current_thread()
+        for sid in [sid for sid, t in self._seal_threads.items() if not t.is_alive()]:
+            del self._seal_threads[sid]
+        return [t for t in self._seal_threads.values() if t is not me]
+
     def wait_for_seal(self) -> None:
         """Block until every background seal has finished."""
-        me = threading.current_thread()
-        for thread in list(self._seal_threads.values()):
-            if thread.is_alive() and thread is not me:
-                thread.join()
-        self._seal_threads = {sid: t for sid, t in self._seal_threads.items() if t.is_alive()}
+        while True:
+            with self._lock:
+                busy = self._live_seal_threads()
+            if not busy:
+                return
+            for t in busy:
+                t.join()
 
     def _max_concurrent_builds(self) -> int:
         if self.config.build_processes > 0 and not self._pool_broken:
             return self.config.build_processes
         return 1  # in-process builds share the GIL; running several gains nothing
-
-    def _wait_for_build_slot(self) -> None:
-        me = threading.current_thread()
-        while True:
-            alive = [t for t in self._seal_threads.values() if t.is_alive() and t is not me]
-            if len(alive) < self._max_concurrent_builds():
-                self._seal_threads = {sid: t for sid, t in self._seal_threads.items() if t.is_alive()}
-                return
-            alive[0].join()
 
     def compact(self, wait: bool = True) -> dict:
         """Rewrite sealed segments that are mostly tombstones, and merge small ones.
