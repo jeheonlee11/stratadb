@@ -78,10 +78,11 @@ class RemoteCollection:
         return self._post("get", {"ids": list(ids), "include_vectors": include_vectors, "fields": fields})["records"]
 
     def search(self, vector=None, k: int = 10, filter=None, ef=None, include_vectors=False,
-               expand_hops: int = 0, graph_boost: float = 0.0, text: str | None = None, fields=None) -> list[dict]:
+               expand_hops: int = 0, graph_boost: float = 0.0, text: str | None = None, fields=None,
+               graph_rels=None) -> list[dict]:
         body = {"vector": None if vector is None else _jsonable(vector), "k": k, "filter": filter, "ef": ef,
                 "include_vectors": include_vectors, "expand_hops": expand_hops, "graph_boost": graph_boost,
-                "text": text, "fields": fields}
+                "text": text, "fields": fields, "graph_rels": graph_rels}
         return self._post("search", body)["hits"]
 
     def search_many(self, vectors, k: int = 10, **kwargs) -> list[list[dict]]:
@@ -107,8 +108,9 @@ class RemoteCollection:
         return self._post("unlink", {"edges": edges})["unlinked"]
 
     def neighbors(self, rid: str, hops: int = 1, rel=None, direction: str = "both",
-                  limit=None, hydrate: bool = False) -> list[dict]:
-        body = {"id": rid, "hops": hops, "rel": rel, "direction": direction, "limit": limit, "hydrate": hydrate}
+                  limit=None, hydrate: bool = False, filter=None) -> list[dict]:
+        body = {"id": rid, "hops": hops, "rel": rel, "direction": direction, "limit": limit, "hydrate": hydrate,
+                "filter": filter}
         return self._post("neighbors", body)["neighbors"]
 
     def put_nodes(self, nodes: list[dict]) -> int:

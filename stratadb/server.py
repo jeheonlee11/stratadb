@@ -113,7 +113,7 @@ class Api:
                                 {"records": col.get(body["ids"], bool(body.get("include_vectors")), body.get("fields"))})[1],
                 "search": lambda: {"hits": col.search(
                     body.get("vector"), int(body.get("k", 10)),
-                    **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text", "fields"))},
+                    **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text", "fields", "graph_rels"))},
                 "search_many": lambda: (_require(body, "vectors"), {"results": col.search_many(
                     body["vectors"], int(body.get("k", 10)),
                     **_pick(body, "filter", "ef", "include_vectors", "expand_hops", "graph_boost", "text"))})[1],
@@ -126,7 +126,7 @@ class Api:
                 "link": lambda: (_require(body, "edges"), {"linked": col.link(body["edges"])})[1],
                 "unlink": lambda: (_require(body, "edges"), {"unlinked": col.unlink(body["edges"])})[1],
                 "neighbors": lambda: (_require(body, "id"), {"neighbors": col.neighbors(
-                    body["id"], **_pick(body, "hops", "rel", "direction", "limit", "hydrate"))})[1],
+                    body["id"], **_pick(body, "hops", "rel", "direction", "limit", "hydrate", "filter"))})[1],
                 "nodes": lambda: (_require(body, "nodes"), {"put": col.put_nodes(body["nodes"])})[1],
                 "get_nodes": lambda: (_require(body, "ids"), {"nodes": col.get_nodes(body["ids"])})[1],
                 "list_nodes": lambda: col.list_nodes(int(body.get("limit", 100)), int(body.get("offset", 0)),

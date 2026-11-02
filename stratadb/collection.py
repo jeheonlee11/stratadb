@@ -518,6 +518,7 @@ class Collection:
         graph_boost: float = 0.0,
         text: str | None = None,
         fields: list[str] | None = None,
+        graph_rels: list[str] | None = None,
     ) -> list[dict]:
         """Vector, keyword or hybrid search across all segments.
 
@@ -531,6 +532,7 @@ class Collection:
         ``graph_boost``  0..1; re-rank with spreading activation over edges, so
                          records strongly linked to many good matches move up
                          and linked records outside the vector top-k can enter
+        ``graph_rels``   relation types graph_boost may follow (default: all)
         """
         if k <= 0:
             return []
@@ -571,7 +573,7 @@ class Collection:
                 hits.sort()
                 scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits[:pool_k]]
                 if graph_boost > 0 and scored:
-                    scored = self._graph_rerank(q, scored, graph_boost, pred)
+                    scored = self._graph_rerank(q, scored, graph_boost, pred, graph_rels)
                 for item in scored:
                     info = {"score": item[0], "distance": item[1]}
                     if graph_boost > 0:
@@ -629,7 +631,7 @@ class Collection:
             raise ValueError("vectors must be a 2-D array of query vectors")
         return [self.search(row, k, **kwargs) for row in vecs]
 
-    def _graph_rerank(self, q, scored, alpha, pred):
+    def _graph_rerank(self, q, scored, alpha, pred, rels=None):
         """Spreading activation over the edge graph.
 
         Only candidates that stand out from the pool spread activation: a seed's
@@ -648,7 +650,7 @@ class Collection:
         for rid, s in strength.items():
             if s <= 0:
                 continue
-            nbrs = self.graph.weighted_neighbors(rid)
+            nbrs = self.graph.weighted_neighbors(rid, rels)
             if not nbrs:
                 continue
             total_w = sum(abs(w) for _, w in nbrs) or 1.0
@@ -673,13 +675,28 @@ class Collection:
         return reranked
 
     def neighbors(self, rid: str, hops: int = 1, rel: str | None = None,
-                  direction: str = "both", limit: int | None = None, hydrate: bool = False) -> list[dict]:
+                  direction: str = "both", limit: int | None = None, hydrate: bool = False,
+                  filter: dict | None = None) -> list[dict]:
+        """Graph neighbourhood of ``rid``. ``filter`` keeps only neighbours whose
+        metadata (vector record) or node properties match; traversal still
+        passes through non-matching nodes. Filtered results are hydrated."""
+        pred = compile_filter(filter)
         with self._lock:
-            result = self.graph.neighbors(str(rid), hops=hops, rel=rel, direction=direction, limit=limit)
-            if hydrate:
+            # With a filter, walk without a limit and cap after filtering.
+            result = self.graph.neighbors(str(rid), hops=hops, rel=rel, direction=direction,
+                                          limit=None if pred else limit)
+            if hydrate or pred:
+                kept = []
                 for item in result:
                     found = self._locate(item["id"])
-                    item["metadata"] = found[1] if found else None
+                    meta = found[1] if found else self.graph.get_node(item["id"])
+                    if pred is not None and not pred(meta or {}):
+                        continue
+                    item["metadata"] = meta
+                    kept.append(item)
+                    if pred is not None and limit is not None and len(kept) >= limit:
+                        break
+                result = kept
             return result
 
     def shortest_path(self, src: str, dst: str, max_hops: int = 6, rel: str | None = None,

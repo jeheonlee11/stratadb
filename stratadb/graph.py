@@ -146,10 +146,13 @@ class GraphStore:
                 frontier.append((nxt, depth + 1))
         return result
 
-    def weighted_neighbors(self, node: str) -> list[tuple[str, float]]:
-        """Undirected 1-hop neighbours with their strongest edge weight."""
+    def weighted_neighbors(self, node: str, rels=None) -> list[tuple[str, float]]:
+        """Undirected 1-hop neighbours with their strongest edge weight,
+        optionally over the given relation types only."""
         best: dict[str, float] = {}
-        for nxt, _, w in self._step(node, "both", None):
+        for nxt, rel, w in self._step(node, "both", None):
+            if rels is not None and rel not in rels:
+                continue
             if nxt != node and w > best.get(nxt, float("-inf")):
                 best[nxt] = w
         return list(best.items())

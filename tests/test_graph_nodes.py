@@ -58,3 +58,23 @@ def test_old_edge_only_snapshots_still_load():
     assert g.neighbor_ids("a") == {"b"} and g.node_count == 0
     roundtrip = GraphStore.from_json(json.loads(json.dumps(g.to_json())))
     assert roundtrip.get_edge("a", "b", "rel") == (1.0, {})
+
+
+def test_neighbors_filter_and_graph_boost_rels(tmp_path):
+    col = Collection(tmp_path / "c", CollectionConfig(dim=4, background_seal=False, seal_threshold=1000))
+    q = np.array([1.0, 0, 0, 0])
+    col.upsert(["hit"], q.reshape(1, -1), [{"kind": "doc"}])
+    col.upsert(["far_a", "far_b"], np.array([[0, 1.0, 0, 0], [0, 0, 1.0, 0]]), [{"kind": "doc"}, {"kind": "note"}])
+    col.put_nodes([{"id": "topic", "props": {"kind": "topic"}}])
+    col.link([{"src": "hit", "dst": "far_a", "rel": "cites"}, {"src": "hit", "dst": "far_b", "rel": "mentions"},
+              {"src": "hit", "dst": "topic", "rel": "about"}])
+    # neighbours filtered by record metadata or node properties, hydrated
+    assert [n["id"] for n in col.neighbors("hit", filter={"kind": "doc"})] == ["far_a"]
+    assert [n["id"] for n in col.neighbors("hit", filter={"kind": "topic"})] == ["topic"]
+    assert col.neighbors("hit", filter={"kind": "topic"})[0]["metadata"] == {"kind": "topic"}
+    assert len(col.neighbors("hit", filter={"kind": {"$in": ["doc", "note"]}}, limit=1)) == 1
+    # graph_boost restricted to one relation type spreads activation along it only
+    scores_all = {h["id"]: h["graph_score"] for h in col.search(q, 3, graph_boost=0.5)}
+    scores_cites = {h["id"]: h["graph_score"] for h in col.search(q, 3, graph_boost=0.5, graph_rels=["cites"])}
+    assert scores_all["far_a"] > 0 and scores_all["far_b"] > 0
+    assert scores_cites["far_a"] > 0 and scores_cites["far_b"] == 0

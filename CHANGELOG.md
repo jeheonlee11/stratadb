@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `neighbors(filter=...)` keeps only neighbours whose metadata or node
+  properties match; `graph_rels=[...]` limits which relation types
+  `graph_boost` follows.
 - `tune_ef(target_recall, queries=None)`: binary-searches the smallest `ef`
   that meets a recall target against exact search, using your own query
   vectors or synthetic ones pushed away from the stored data (a stored vector

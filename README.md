@@ -21,6 +21,8 @@ kb.search(q, k=5)                                         # nearest neighbours
 kb.search(q, k=5, filter={"year": {"$gte": 2020}})        # with metadata filters
 kb.search(q, k=5, expand_hops=1)                          # attach each hit's neighbourhood
 kb.search(q, k=5, graph_boost=0.4)                        # re-rank by spreading activation over edges
+kb.search(q, k=5, graph_boost=0.4, graph_rels=["cites"])   # ...following only those relation types
+kb.neighbors("ana", hops=2, filter={"kind": "person"})     # neighbourhood, filtered by metadata
 kb.search(q, text="E1042 checksum", k=5)                  # hybrid: vector + BM25 keyword, fused
 kb.search_many(queries, k=5)                               # many queries, one call
 kb.search(q, k=5, fields=["title", "meta.page"])           # return only those metadata keys
@@ -174,7 +176,7 @@ notes.search(query, k=5, graph_boost=0.3)
 | POST | `/collections/<name>/search` | `{vector?, text?, k?, filter?, fields?, ef?, expand_hops?, graph_boost?, include_vectors?}` |
 | POST | `/collections/<name>/get` · `delete` · `scan` · `count` | `{ids}` / `{ids}` / `{filter?, limit?, offset?}` / `{filter?}` |
 | POST | `/collections/<name>/update` · `delete_where` | `{ids, patch, replace?}` / `{filter}` |
-| POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
+| POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?, filter?, hydrate?}` |
 | POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
 | POST | `/collections/<name>/path` · `pagerank` · `components` | `{src, dst, max_hops?}` / `{top?, seeds?}` / |
 | POST | `/collections/<name>/checkpoint` · `compact` · `merge` | / / `{max_segments?}` |
@@ -301,7 +303,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 136 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 137 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random
