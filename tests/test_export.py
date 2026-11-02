@@ -43,3 +43,32 @@ def test_cli_export_import(tmp_path, capsys):
     assert '"records": 2' in capsys.readouterr().out
     with Database(tmp_path / "db2") as db:
         assert db["b"].get(["y"])[0]["metadata"] == {"k": 2}
+
+
+def test_export_over_http_streams_jsonl(tmp_path):
+    import json
+    import threading
+
+    from stratadb.client import Client, StrataError
+    from stratadb.server import make_server
+
+    db = Database(tmp_path / "db")
+    db.create_collection("a", dim=4).upsert(["x", "y"], np.eye(4)[:2], [{"k": 1}, {"k": 2}])
+    db["a"].link([{"src": "x", "dst": "y", "rel": "next"}])
+    srv = make_server(db, port=0, api_key="secret")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        buf = io.StringIO()
+        assert Client(f"http://127.0.0.1:{srv.server_port}", api_key="secret").collection("a").export_jsonl(buf) == 4
+        lines = [json.loads(l) for l in buf.getvalue().splitlines()]
+        assert [l["type"] for l in lines] == ["collection", "record", "record", "edge"]
+        with pytest.raises(StrataError):
+            Client(f"http://127.0.0.1:{srv.server_port}").collection("a")
+        with pytest.raises(StrataError):
+            Client(f"http://127.0.0.1:{srv.server_port}", api_key="secret").collection("nope").export_jsonl(io.StringIO())
+        # the export round-trips through import
+        buf.seek(0)
+        dst = Collection(tmp_path / "dst", CollectionConfig(dim=4))
+        assert dst.import_jsonl(buf) == {"records": 2, "nodes": 0, "edges": 1}
+    finally:
+        srv.shutdown(); srv.server_close(); db.close()

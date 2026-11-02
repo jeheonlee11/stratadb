@@ -176,6 +176,7 @@ notes.search(query, k=5, graph_boost=0.3)
 | POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
 | POST | `/collections/<name>/path` · `pagerank` · `components` | `{src, dst, max_hops?}` / `{top?, seeds?}` / |
 | POST | `/collections/<name>/checkpoint` · `compact` · `merge` | / / `{max_segments?}` |
+| GET | `/collections/<name>/export` | streams the collection as JSON lines |
 
 Open `http://127.0.0.1:7700/` for the **web console**: browse collections and their stats,
 run filtered scans and keyword searches, find records similar to any stored record (using its
@@ -297,7 +298,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 131 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 132 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

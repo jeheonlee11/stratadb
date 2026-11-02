@@ -29,6 +29,7 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/checkpoint
     POST   /collections/<name>/compact
     POST   /collections/<name>/merge       {max_segments?}
+    GET    /collections/<name>/export      streams JSON lines (see Collection.export_jsonl)
 
 With ``api_key`` set, every request except ``/health`` needs
 ``Authorization: Bearer <key>``.
@@ -171,9 +172,39 @@ def make_handler(api: Api, api_key: str | None):
             self.end_headers()
             self.wfile.write(data)
 
+        def _send_export(self, name: str) -> None:
+            """Stream a collection as JSON lines (chunked, so no size limit)."""
+            try:
+                col = api._col(name)
+            except ApiError as e:
+                self._send(e.status, {"error": str(e)})
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            out = self.wfile
+
+            class Chunked:
+                def write(self, text: str) -> None:
+                    data = text.encode()
+                    out.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+
+            col.export_jsonl(Chunked())
+            out.write(b"0\r\n\r\n")
+
         def _dispatch(self, method: str) -> None:
-            if method == "GET" and self.path.split("?")[0] in ("/", "/console"):
+            path = self.path.split("?")[0]
+            if method == "GET" and path in ("/", "/console"):
                 self._send_console()  # the page is static; its API calls carry the key
+                return
+            parts = [p for p in path.split("/") if p]
+            if method == "GET" and len(parts) == 3 and parts[0] == "collections" and parts[2] == "export":
+                if api_key and not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
+                                                      f"Bearer {api_key}".encode()):
+                    self._send(401, {"error": "missing or wrong API key"})
+                    return
+                self._send_export(parts[1])
                 return
             try:
                 if api_key and self.path.split("?")[0] != "/health":

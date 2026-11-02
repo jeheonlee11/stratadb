@@ -134,6 +134,21 @@ class RemoteCollection:
     def checkpoint(self) -> int:
         return self._post("checkpoint")["lsn"]
 
+    def export_jsonl(self, fp) -> int:
+        """Stream the collection's JSON-lines export into ``fp``; returns lines written."""
+        req = urllib.request.Request(f"{self.client.url}/collections/{self.name}/export")
+        if self.client.api_key:
+            req.add_header("Authorization", f"Bearer {self.client.api_key}")
+        n = 0
+        try:
+            with urllib.request.urlopen(req, timeout=self.client.timeout) as resp:
+                for line in resp:
+                    fp.write(line.decode("utf-8"))
+                    n += 1
+        except urllib.error.HTTPError as e:
+            raise StrataError(e.code, e.reason) from None
+        return n
+
     def merge(self, max_segments: int = 1) -> dict:
         return self._post("merge", {"max_segments": max_segments})
 
