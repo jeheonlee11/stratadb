@@ -127,7 +127,8 @@ async function select(name) {
   const segs = s.sealed_segments || [];
   content.innerHTML = `
     <div class="card">
-      <h2>${esc(s.name)}</h2>
+      <div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(s.name)}</h2>
+        <button class="ghost" id="export">Export JSONL</button></div>
       <div class="stats">
         ${stat(s.count.toLocaleString(), "records")}${stat(s.dim === 0 ? "graph" : s.dim, "dimensions")}
         ${stat(s.dim === 0 ? "n/a" : s.metric, "metric")}${stat(segs.length, "sealed segments")}${stat(s.growing + (s.sealing || 0), "growing / sealing")}
@@ -144,6 +145,22 @@ async function select(name) {
       </div>
       <div id="panel"></div>
     </div>`;
+  $("#export").onclick = async () => {
+    // Fetch with the API key header, then hand the browser a download.
+    try {
+      const headers = {};
+      const key = $("#apikey").value.trim();
+      if (key) headers["Authorization"] = "Bearer " + key;
+      const res = await fetch(`/collections/${encodeURIComponent(name)}/export`, {headers});
+      if (!res.ok) throw new Error(`${res.status}: ${(await res.json().catch(() => ({}))).error || res.statusText}`);
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${name}.jsonl`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (e) { alert(e.message); }
+  };
   content.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => showTab(t.dataset.tab)));
   if (s.dim === 0) {
     // Graph-only: no vectors to search, so hide the vector tabs.

@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- `GET /collections/<name>/export` streams a JSON-lines dump; `RemoteCollection.export_jsonl`.
+- `GET /collections/<name>/export` streams a JSON-lines dump; `RemoteCollection.export_jsonl`;
+  an Export button in the console.
 - Compaction and merge build their output segments concurrently in worker
   processes (merge(2) of 20k vectors: 14 s, the time of one build).
 - `merge(max_segments)` rewrites sealed segments into fewer, larger ones for
