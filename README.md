@@ -84,6 +84,9 @@ activation, so a weak, barely related match can't promote its neighbours.
   N-hop neighbours, `expand_hops` and `graph_boost` in search, cascade on
   delete. Graph-only collections (`dim=0`) hold a knowledge graph with no
   vectors at all.
+- **Graph algorithms**: shortest paths (typed / directed), weighted PageRank
+  and personalized PageRank (verified against networkx to 1e-6), connected
+  components.
 - **Hybrid search**: a BM25 keyword index over one metadata field, fused with
   vector results by reciprocal rank fusion. Catches exact tokens (error codes,
   function names, part numbers) that embeddings blur.
@@ -126,6 +129,9 @@ with Database("./data") as db:
     kg.put_nodes([{"id": "Ada", "props": {"type": "person"}}, {"id": "Engine", "props": {"type": "machine"}}])
     kg.link([{"src": "Ada", "dst": "Engine", "rel": "wrote_about"}])
     kg.neighbors("Ada", hydrate=True)
+    kg.shortest_path("Ada", "Engine")                          # [{"from", "to", "rel", "weight"}, ...]
+    kg.pagerank(top=10, seeds=["Ada"])                         # personalized PageRank around Ada
+    kg.components()
 ```
 
 ## Run it as a server
@@ -153,6 +159,7 @@ notes.search(query, k=5, graph_boost=0.3)
 | POST | `/collections/<name>/get` · `delete` · `scan` | `{ids}` / `{ids}` / `{filter?, limit?}` |
 | POST | `/collections/<name>/link` · `unlink` · `neighbors` | `{edges}` / `{edges}` / `{id, hops?, rel?, direction?}` |
 | POST | `/collections/<name>/nodes` · `get_nodes` · `list_nodes` | `{nodes: [{id, props}]}` / `{ids}` / `{limit?, offset?, prefix?}` |
+| POST | `/collections/<name>/path` · `pagerank` · `components` | `{src, dst, max_hops?}` / `{top?, seeds?}` / |
 | POST | `/collections/<name>/checkpoint` · `compact` | |
 
 Open `http://127.0.0.1:7700/` for the **web console**: browse collections and their stats,
@@ -241,7 +248,7 @@ recovery protocol, and the spreading-activation re-ranker.
 pytest -q
 ```
 
-The 86 tests cover HNSW recall on three metrics, filters, WAL corruption and
+The 113 tests cover HNSW recall on three metrics, filters, WAL corruption and
 torn tails, crash recovery without `close()`, a crash in the middle of a
 background index build, concurrent writers, compaction, hybrid search, the
 graph layer and the HTTP API, plus a **crash-recovery fuzzer**: random

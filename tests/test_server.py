@@ -99,3 +99,14 @@ def test_list_nodes_pages_and_filters(server):
     assert page["total"] == 15 and [n["id"] for n in page["nodes"]] == ["n00", "n01", "n02", "n03", "n04"]
     assert page["nodes"][0]["degree"] == 1
     assert g.list_nodes(prefix="n1")["total"] == 5
+
+
+def test_graph_algorithm_endpoints(server):
+    client = Client(server, api_key="secret")
+    g = client.create_collection("net", dim=0)
+    g.link([{"src": "a", "dst": "b"}, {"src": "b", "dst": "c"}, {"src": "x", "dst": "y"}])
+    assert [s["to"] for s in g.shortest_path("a", "c")] == ["b", "c"]
+    assert g.shortest_path("a", "x") is None
+    assert sorted(map(sorted, g.components())) == [["a", "b", "c"], ["x", "y"]]
+    ranking = g.pagerank(top=2, seeds=["a"])
+    assert len(ranking) == 2 and ranking[0][1] >= ranking[1][1]

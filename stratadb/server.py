@@ -19,6 +19,9 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/nodes       {nodes: [{id, props}]}
     POST   /collections/<name>/get_nodes   {ids}
     POST   /collections/<name>/list_nodes  {limit?, offset?, prefix?}
+    POST   /collections/<name>/path        {src, dst, max_hops?, rel?, direction?}
+    POST   /collections/<name>/pagerank    {top?, seeds?, damping?, directed?}
+    POST   /collections/<name>/components
     POST   /collections/<name>/checkpoint
     POST   /collections/<name>/compact
 
@@ -113,6 +116,10 @@ class Api:
                 "get_nodes": lambda: (_require(body, "ids"), {"nodes": col.get_nodes(body["ids"])})[1],
                 "list_nodes": lambda: col.list_nodes(int(body.get("limit", 100)), int(body.get("offset", 0)),
                                                      body.get("prefix")),
+                "path": lambda: (_require(body, "src", "dst"), {"path": col.shortest_path(
+                    body["src"], body["dst"], **_pick(body, "max_hops", "rel", "direction"))})[1],
+                "pagerank": lambda: {"ranking": col.pagerank(**_pick(body, "top", "seeds", "damping", "directed"))},
+                "components": lambda: {"components": col.components()},
                 "checkpoint": lambda: {"lsn": col.checkpoint()},
                 "compact": lambda: col.compact(),
             }.get(action)

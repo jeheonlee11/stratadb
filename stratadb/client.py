@@ -107,6 +107,17 @@ class RemoteCollection:
     def list_nodes(self, limit: int = 100, offset: int = 0, prefix: str | None = None) -> dict:
         return self._post("list_nodes", {"limit": limit, "offset": offset, "prefix": prefix})
 
+    def shortest_path(self, src: str, dst: str, max_hops: int = 6, rel=None, direction: str = "both"):
+        return self._post("path", {"src": src, "dst": dst, "max_hops": max_hops, "rel": rel,
+                                   "direction": direction})["path"]
+
+    def pagerank(self, top=None, seeds=None, damping: float = 0.85, directed: bool = True) -> list:
+        return [tuple(x) for x in self._post("pagerank", {"top": top, "seeds": seeds, "damping": damping,
+                                                          "directed": directed})["ranking"]]
+
+    def components(self) -> list[list[str]]:
+        return self._post("components")["components"]
+
     def checkpoint(self) -> int:
         return self._post("checkpoint")["lsn"]
 

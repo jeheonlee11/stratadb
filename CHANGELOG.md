@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Graph algorithms**: `shortest_path`, `pagerank` (incl. personalized),
+  `components`, over HTTP too. Checked against networkx.
 - **Secondary indexes** on metadata fields (`index_fields`): hash and
   numeric-range indexes narrow filtered search; exact plans skip the
   per-record filter check. 60x faster for selective equality filters.

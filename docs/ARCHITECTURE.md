@@ -161,6 +161,17 @@ This is what lets a question about "battery manufacturers' employees" return
 the people linked to battery companies even when the people's own text never
 mentions batteries (`examples/graph_retrieval.py`).
 
+## Graph algorithms
+
+- `shortest_path`: breadth-first, fewest hops, optionally restricted to one
+  relation type and edge direction, bounded by `max_hops`.
+- `pagerank`: power iteration over a weighted edge list held in numpy arrays
+  (`bincount` does the sparse matrix-vector product). Dangling nodes
+  redistribute along the personalization vector, the same definition
+  networkx uses; personalized PageRank restarts walks at given seeds, which
+  scores nodes by graph proximity to them.
+- `components`: weakly connected components by iterative DFS.
+
 ## Secondary indexes
 
 `index_fields=[...]` keeps, per field, a hash map from value to ids (equality

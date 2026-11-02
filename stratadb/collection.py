@@ -572,6 +572,25 @@ class Collection:
                     item["metadata"] = found[1] if found else None
             return result
 
+    def shortest_path(self, src: str, dst: str, max_hops: int = 6, rel: str | None = None,
+                      direction: str = "both") -> list[dict] | None:
+        with self._lock:
+            return self.graph.shortest_path(str(src), str(dst), max_hops=max_hops, rel=rel, direction=direction)
+
+    def pagerank(self, top: int | None = None, seeds: dict[str, float] | list[str] | None = None,
+                 damping: float = 0.85, directed: bool = True) -> list[tuple[str, float]]:
+        """Nodes ranked by (personalized, if ``seeds``) PageRank, highest first."""
+        if isinstance(seeds, (list, tuple)):
+            seeds = {str(s): 1.0 for s in seeds}
+        with self._lock:
+            scores = self.graph.pagerank(damping=damping, personalization=seeds, directed=directed)
+        ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+        return ranked[:top] if top is not None else ranked
+
+    def components(self) -> list[list[str]]:
+        with self._lock:
+            return self.graph.components()
+
     def edges(self, rid: str, direction: str = "both", rel: str | None = None) -> list[dict]:
         with self._lock:
             return self.graph.edges(str(rid), direction=direction, rel=rel)
