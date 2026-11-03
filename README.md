@@ -286,6 +286,22 @@ recall at the same `ef`, build faster and in parallel, and now cost little
 extra per query since they are searched concurrently. The default is a
 reasonable middle; raise `seal_threshold` for read-heavy, static data.
 
+**One million vectors on one node** (synthetic embedding-like data, 64
+dims, ten segments of 100k, `sync="never"`, four build threads):
+
+| | |
+|---|---|
+| build, including ten index builds | 67 s (15k vectors/s end to end) |
+| on disk (vectors + codes + graphs + metadata) | 462 MB |
+| reopen (everything memory-mapped) | 0.9 s |
+| recall@10 / p50 at ef=64 | **1.000 / 0.53 ms** (1,870 qps, one client thread) |
+| filtered, 50% of records pass, steady state | 1.5 ms |
+| first filtered query on a field (builds its columns on all ten segments) | 0.6 s |
+
+Everything but the sealed vectors and codes lives in memory: ids, metadata,
+graph structure and the HNSW links. That is what bounds a single node at a
+few million vectors; past that, shard across nodes (see [Cluster](#cluster)).
+
 **Filtered search with secondary indexes** (same 20k vectors, `index_fields=["src", "year"]`):
 
 | filter | no index | indexed |
