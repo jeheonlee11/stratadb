@@ -150,8 +150,7 @@ def build_segment_files(path: Path, vectors: np.ndarray, ids: list[str], metas: 
     path = Path(path)
     index = HNSWIndex(vectors.shape[1], metric=metric, m=m, ef_construction=ef_construction,
                       capacity=max(1, len(vectors)))
-    for vec in vectors:
-        index.add(vec)
+    index.add_batch(vectors)  # one call into the native library when it is loaded
     tmp = path.with_name(path.name + ".building")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
@@ -183,7 +182,7 @@ class SealedSegment:
 
     @property
     def tombstones(self) -> list[int]:
-        return sorted(self.index._deleted)
+        return self.index.deleted_labels()
 
     @classmethod
     def build(
@@ -293,6 +292,5 @@ class SealedSegment:
         # graph where almost every node is rejected.
         if len(allowed) * dim <= exact_limit or len(allowed) <= max(k * 32, len(self.pos) // 20):
             return self._exact(q, k, allowed)
-        allowed_set = set(allowed)
-        hits = self.index.search(q, k, ef=ef, allow=allowed_set.__contains__)
+        hits = self.index.search(q, k, ef=ef, allow_labels=allowed)
         return [(d, self.ids[label]) for label, d in hits]

@@ -1,6 +1,13 @@
 """Hierarchical Navigable Small World (HNSW) graph index.
 
-A from-scratch implementation of Malkov & Yashunin (2016) on top of numpy.
+A from-scratch implementation of Malkov & Yashunin (2016). Two interchangeable
+implementations share one on-disk format:
+
+- ``PyHNSWIndex``: pure numpy, always available.
+- ``NativeHNSWIndex``: the same algorithm in C (``native/hnsw.c``), loaded
+  through ctypes. Much faster to build and query; used automatically when the
+  library is present (``HNSWIndex`` points at whichever is in use).
+
 Nodes are dense integer labels ``0..n-1`` assigned in insertion order; the
 caller maps them to user ids. Distances are "smaller is closer":
 
@@ -14,6 +21,7 @@ never appear in results. Segments rebuild their index on compaction.
 
 from __future__ import annotations
 
+import ctypes
 import heapq
 import math
 from pathlib import Path
@@ -21,7 +29,18 @@ from typing import Callable
 
 import numpy as np
 
+from . import native
+
 METRICS = ("cosine", "ip", "l2")
+
+
+def _combine_allow(allow, allow_labels):
+    if allow_labels is None:
+        return allow
+    allowed = allow_labels if isinstance(allow_labels, (set, frozenset)) else set(np.asarray(allow_labels).tolist())
+    if allow is None:
+        return allowed.__contains__
+    return lambda label: label in allowed and allow(label)
 
 
 def normalize(vectors: np.ndarray) -> np.ndarray:
@@ -30,7 +49,7 @@ def normalize(vectors: np.ndarray) -> np.ndarray:
     return vectors / norms
 
 
-class HNSWIndex:
+class PyHNSWIndex:
     def __init__(
         self,
         dim: int,
@@ -225,22 +244,29 @@ class HNSWIndex:
     def is_deleted(self, label: int) -> bool:
         return label in self._deleted
 
+    def deleted_labels(self) -> list[int]:
+        return sorted(self._deleted)
+
     def search(
         self,
         vector,
         k: int = 10,
         ef: int | None = None,
         allow: Callable[[int], bool] | None = None,
+        allow_labels=None,
     ) -> list[tuple[int, float]]:
         """Return up to k (label, distance) pairs, closest first.
 
-        ``allow`` filters labels (e.g. a metadata predicate). Filtering happens
-        during the search by widening ``ef`` until enough allowed hits are found.
+        ``allow`` filters labels (e.g. a metadata predicate); ``allow_labels``
+        is the same restriction given as a collection of labels. Filtering
+        happens during the search by widening ``ef`` until enough allowed hits
+        are found.
         """
         if self.entry_point is None or k <= 0:
             return []
         q = self._prepare(vector)
         ef = max(ef or 64, k)
+        allow = _combine_allow(allow, allow_labels)
 
         def keep(label: int) -> bool:
             return label not in self._deleted and (allow is None or allow(label))
@@ -256,12 +282,13 @@ class HNSWIndex:
                 return hits[:k]
             ef = min(ef * 4, len(self._levels))
 
-    def brute_force(self, vector, k: int = 10, allow: Callable[[int], bool] | None = None):
+    def brute_force(self, vector, k: int = 10, allow: Callable[[int], bool] | None = None, allow_labels=None):
         """Exact search, used for small/filtered sets and as ground truth in tests."""
         n = len(self._levels)
         if n == 0:
             return []
         q = self._prepare(vector)
+        allow = _combine_allow(allow, allow_labels)
         labels = [i for i in range(n) if i not in self._deleted and (allow is None or allow(i))]
         if not labels:
             return []
@@ -301,7 +328,7 @@ class HNSWIndex:
         )
 
     @classmethod
-    def load(cls, path, mmap: bool = False) -> "HNSWIndex":
+    def load(cls, path, mmap: bool = False) -> "PyHNSWIndex":
         """Load an index. With ``mmap`` and vectors stored in a sibling
         ``vectors.npy`` (see ``save``), the vectors are memory-mapped read-only:
         reopening costs no copying, and pages load from disk on first touch.
@@ -333,3 +360,265 @@ class HNSWIndex:
             idx.entry_point = None if ep < 0 else ep
             idx.max_level = max_level
         return idx
+
+
+# ---------------------------------------------------------------------------
+# Native implementation
+# ---------------------------------------------------------------------------
+
+class NativeHNSWIndex:
+    """HNSW index backed by ``native/hnsw.c``. Same API and file format as
+    ``PyHNSWIndex``; vectors live in C memory (or in a memory map after a
+    ``load(mmap=True)``)."""
+
+    _METRIC_CODES = {"cosine": 0, "ip": 1, "l2": 2}
+
+    def __init__(
+        self,
+        dim: int,
+        metric: str = "cosine",
+        m: int = 16,
+        ef_construction: int = 128,
+        seed: int = 42,
+        capacity: int = 1024,
+    ):
+        if metric not in METRICS:
+            raise ValueError(f"metric must be one of {METRICS}")
+        lib = native.load()
+        if lib is None:
+            raise RuntimeError(native.status())
+        self._lib = lib
+        self.dim = dim
+        self.metric = metric
+        self.m = m
+        self.m0 = 2 * m
+        self.ef_construction = max(ef_construction, m)
+        self.level_mult = 1.0 / math.log(m)
+        self._rng = np.random.default_rng(seed)
+        self._vectors: np.ndarray | None = None  # external (memory-mapped) storage, if any
+        self._readonly = False
+        self._h = lib.hnsw_new(dim, self._METRIC_CODES[metric], m, self.ef_construction, max(1, capacity))
+        if not self._h:
+            raise MemoryError("could not allocate native HNSW index")
+
+    def __del__(self):
+        h = getattr(self, "_h", None)
+        if h:
+            self._lib.hnsw_free(h)
+            self._h = None
+
+    # ------------------------------------------------------------------ basics
+    def __len__(self) -> int:
+        return int(self._lib.hnsw_len(self._h))
+
+    @property
+    def live_count(self) -> int:
+        return len(self) - int(self._lib.hnsw_deleted_count(self._h))
+
+    @property
+    def entry_point(self) -> int | None:
+        ep = int(self._lib.hnsw_entry(self._h))
+        return None if ep < 0 else ep
+
+    @property
+    def max_level(self) -> int:
+        return int(self._lib.hnsw_max_level(self._h))
+
+    @property
+    def vectors(self) -> np.ndarray:
+        """The stored (normalized, for cosine) vectors as an ``(n, dim)`` view.
+        The view is valid until the next ``add``."""
+        n = len(self)
+        if self._vectors is not None:
+            return self._vectors[:n]
+        if n == 0:
+            return np.zeros((0, self.dim), dtype=np.float32)
+        ptr = ctypes.cast(self._lib.hnsw_vectors(self._h), ctypes.POINTER(ctypes.c_float))
+        return np.ctypeslib.as_array(ptr, shape=(n, self.dim))
+
+    @staticmethod
+    def _ptr(arr: np.ndarray | None):
+        return None if arr is None else arr.ctypes.data_as(ctypes.c_void_p)
+
+    def _mask(self, allow, allow_labels) -> np.ndarray | None:
+        n = len(self)
+        if allow is None and allow_labels is None:
+            return None
+        mask = np.zeros(n, dtype=np.uint8)
+        if allow_labels is not None:
+            labels = np.fromiter(allow_labels, dtype=np.int64) if isinstance(allow_labels, (set, frozenset)) \
+                else np.asarray(list(allow_labels) if not isinstance(allow_labels, np.ndarray) else allow_labels, dtype=np.int64)
+            labels = labels[(labels >= 0) & (labels < n)]
+            mask[labels] = 1
+            if allow is not None:
+                for label in labels.tolist():
+                    if not allow(label):
+                        mask[label] = 0
+        else:
+            # A Python predicate has to be evaluated for every label; prefer allow_labels.
+            for label in range(n):
+                if allow(label):
+                    mask[label] = 1
+        return mask
+
+    # ----------------------------------------------------------------- insert
+    def add_batch(self, vectors) -> list[int]:
+        if self._readonly:
+            raise RuntimeError("this index is memory-mapped and read-only")
+        vecs = np.ascontiguousarray(vectors, dtype=np.float32)
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+        if vecs.ndim != 2 or vecs.shape[1] != self.dim:
+            raise ValueError(f"expected dim {self.dim}, got {vecs.shape[-1] if vecs.ndim else 0}")
+        n = vecs.shape[0]
+        if n == 0:
+            return []
+        levels = (-np.log(1.0 - self._rng.random(n)) * self.level_mult).astype(np.int32)
+        first = int(self._lib.hnsw_add_batch(self._h, self._ptr(vecs), self._ptr(levels), n))
+        if first == -2:
+            raise RuntimeError("this index is memory-mapped and read-only")
+        if first < 0:
+            raise MemoryError("native HNSW insert failed")
+        return list(range(first, first + n))
+
+    def add(self, vector) -> int:
+        v = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if v.shape[0] != self.dim:
+            raise ValueError(f"expected dim {self.dim}, got {v.shape[0]}")
+        return self.add_batch(v.reshape(1, -1))[0]
+
+    def mark_deleted(self, label: int) -> None:
+        self._lib.hnsw_mark_deleted(self._h, int(label))
+
+    def is_deleted(self, label: int) -> bool:
+        return bool(self._lib.hnsw_is_deleted(self._h, int(label)))
+
+    def deleted_labels(self) -> list[int]:
+        return self._deleted().tolist()
+
+    # ----------------------------------------------------------------- search
+    def search(
+        self,
+        vector,
+        k: int = 10,
+        ef: int | None = None,
+        allow: Callable[[int], bool] | None = None,
+        allow_labels=None,
+    ) -> list[tuple[int, float]]:
+        """Return up to k (label, distance) pairs, closest first. See ``PyHNSWIndex.search``."""
+        n = len(self)
+        if n == 0 or k <= 0:
+            return []
+        q = np.ascontiguousarray(vector, dtype=np.float32).reshape(-1)
+        if q.shape[0] != self.dim:
+            raise ValueError(f"expected dim {self.dim}, got {q.shape[0]}")
+        mask = self._mask(allow, allow_labels)
+        labels = np.empty(k, dtype=np.int64)
+        dists = np.empty(k, dtype=np.float32)
+        cnt = int(self._lib.hnsw_search(self._h, self._ptr(q), k, int(ef or 0), self._ptr(mask),
+                                        self._ptr(labels), self._ptr(dists)))
+        if cnt < 0:
+            raise MemoryError("native HNSW search failed")
+        return list(zip(labels[:cnt].tolist(), dists[:cnt].tolist()))
+
+    def brute_force(self, vector, k: int = 10, allow: Callable[[int], bool] | None = None, allow_labels=None):
+        """Exact search, used for small/filtered sets and as ground truth in tests."""
+        n = len(self)
+        if n == 0 or k <= 0:
+            return []
+        q = np.ascontiguousarray(vector, dtype=np.float32).reshape(-1)
+        if q.shape[0] != self.dim:
+            raise ValueError(f"expected dim {self.dim}, got {q.shape[0]}")
+        mask = self._mask(allow, allow_labels)
+        k = min(k, n)
+        labels = np.empty(k, dtype=np.int64)
+        dists = np.empty(k, dtype=np.float32)
+        cnt = int(self._lib.hnsw_brute_force(self._h, self._ptr(q), k, self._ptr(mask),
+                                             self._ptr(labels), self._ptr(dists)))
+        if cnt < 0:
+            raise MemoryError("native HNSW search failed")
+        return list(zip(labels[:cnt].tolist(), dists[:cnt].tolist()))
+
+    # ------------------------------------------------------------ persistence
+    def _levels(self) -> np.ndarray:
+        n = len(self)
+        if n == 0:
+            return np.zeros(0, dtype=np.int32)
+        ptr = ctypes.cast(self._lib.hnsw_levels(self._h), ctypes.POINTER(ctypes.c_int32))
+        return np.array(np.ctypeslib.as_array(ptr, shape=(n,)), dtype=np.int32)
+
+    def _deleted(self) -> np.ndarray:
+        n = len(self)
+        if n == 0:
+            return np.zeros(0, dtype=np.int64)
+        ptr = ctypes.cast(self._lib.hnsw_deleted(self._h), ctypes.POINTER(ctypes.c_uint8))
+        return np.flatnonzero(np.ctypeslib.as_array(ptr, shape=(n,))).astype(np.int64)
+
+    def save(self, path, vectors_path=None) -> None:
+        """Write the index to ``path`` (.npz), in the format ``PyHNSWIndex`` uses."""
+        n = len(self)
+        levels = self._levels()
+        total = int(self._lib.hnsw_links_total(self._h))
+        flat = np.empty(total, dtype=np.int32)
+        offsets = np.empty(int(levels.sum()) + n + 1, dtype=np.int64)
+        if n:
+            self._lib.hnsw_export_links(self._h, self._ptr(flat), self._ptr(offsets))
+        else:
+            offsets[0] = 0
+        arrays = {}
+        vectors = np.ascontiguousarray(self.vectors)
+        if vectors_path is None:
+            arrays["vectors"] = vectors
+        else:
+            np.save(vectors_path, vectors)
+        ep = self.entry_point
+        np.savez(
+            path,
+            **arrays,
+            levels=levels,
+            links=flat,
+            offsets=offsets,
+            deleted=self._deleted(),
+            params=np.asarray([self.dim, self.m, self.ef_construction, -1 if ep is None else ep, self.max_level],
+                              dtype=np.int64),
+            metric=np.asarray(self.metric),
+        )
+
+    @classmethod
+    def load(cls, path, mmap: bool = False) -> "NativeHNSWIndex":
+        """Load an index written by either implementation. See ``PyHNSWIndex.load``."""
+        path = Path(path)
+        with np.load(path, allow_pickle=False) as data:
+            dim, m, efc, ep, max_level = (int(x) for x in data["params"])
+            levels = np.ascontiguousarray(data["levels"], dtype=np.int32)
+            n = len(levels)
+            idx = cls(dim, metric=str(data["metric"]), m=m, ef_construction=efc, capacity=max(1, n))
+            external = None
+            if "vectors" in data:
+                vectors = np.ascontiguousarray(data["vectors"], dtype=np.float32)
+            else:
+                loaded = np.load(path.with_name("vectors.npy"), mmap_mode="r" if mmap else None)
+                vectors = np.asarray(loaded)
+                if mmap:
+                    external = vectors
+            flat = np.ascontiguousarray(data["links"], dtype=np.int32)
+            offsets = np.ascontiguousarray(data["offsets"], dtype=np.int64)
+            deleted = np.zeros(n, dtype=np.uint8)
+            if len(data["deleted"]):
+                deleted[np.asarray(data["deleted"], dtype=np.int64)] = 1
+        if n == 0:
+            return idx
+        if vectors.shape != (n, dim):
+            raise ValueError(f"vectors have shape {vectors.shape}, expected {(n, dim)}")
+        rc = idx._lib.hnsw_import(idx._h, n, cls._ptr(vectors), 0 if external is not None else 1,
+                                  cls._ptr(levels), cls._ptr(flat), cls._ptr(offsets), cls._ptr(deleted),
+                                  ep, max_level)
+        if rc != 0:
+            raise MemoryError(f"native HNSW import failed ({rc})")
+        if external is not None:
+            idx._vectors = external  # keep the mapping alive; C reads from it
+            idx._readonly = True
+        return idx
+
+
+HNSWIndex = NativeHNSWIndex if native.available() else PyHNSWIndex

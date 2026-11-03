@@ -28,6 +28,7 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from . import native
 from .filters import compile_filter
 from .graph import GraphStore
 from .hnsw import METRICS
@@ -57,10 +58,11 @@ class CollectionConfig:
     compact_deleted_ratio: float = 0.3
     # Build segment indexes on a worker thread instead of blocking writes.
     background_seal: bool = True
-    # Build indexes in worker processes (one per concurrent build) so builds
-    # use other CPU cores instead of sharing this process's GIL. Only segments
-    # with at least build_process_min_records go to a worker: starting one
-    # costs about a second, which small segments don't repay.
+    # Build up to this many indexes at once on other CPU cores: in worker
+    # threads with the native index (it releases the GIL), in worker
+    # processes with the pure-Python one. Only segments with at least
+    # build_process_min_records go to a worker: starting a process costs
+    # about a second, which small segments don't repay.
     build_processes: int = 2
     build_process_min_records: int = 2000
     # Segments with (live records x dim) at or below this are scanned exactly:
@@ -729,8 +731,8 @@ class Collection:
         With ``background_seal`` (the default) the index builds on a worker
         thread: writes go to a fresh growing segment and the frozen one is still
         searched by brute force until the indexed segment is swapped in. Up to
-        ``build_processes`` builds run at once (each in its own worker process);
-        without worker processes, one at a time.
+        ``build_processes`` builds run at once (each on its own core); without
+        workers, one at a time.
         """
         background = self.config.background_seal if wait is None else not wait
         self._check_open()
@@ -819,6 +821,14 @@ class Collection:
         if self.config.build_processes <= 0 or self._pool_broken:
             return None
         if self._pool is None:
+            if native.available():
+                # The native index releases the GIL while it builds, so plain
+                # threads use every core with no pickling of the vectors.
+                from concurrent.futures import ThreadPoolExecutor
+
+                self._pool = ThreadPoolExecutor(max_workers=self.config.build_processes,
+                                                thread_name_prefix=f"stratadb-build-{self.name}")
+                return self._pool
             import multiprocessing
             from concurrent.futures import ProcessPoolExecutor
 
@@ -879,7 +889,7 @@ class Collection:
     def _max_concurrent_builds(self) -> int:
         if self.config.build_processes > 0 and not self._pool_broken:
             return self.config.build_processes
-        return 1  # in-process builds share the GIL; running several gains nothing
+        return 1  # pure-Python builds share the GIL; running several gains nothing
 
     def compact(self, wait: bool = True) -> dict:
         """Rewrite sealed segments that are mostly tombstones, and merge small ones.

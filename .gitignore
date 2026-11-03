@@ -7,3 +7,6 @@ dist/
 data/
 .venv/
 .claude/
+*.so
+*.pyd
+*.dylib

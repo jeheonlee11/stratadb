@@ -23,7 +23,7 @@ stratadb = "stratadb.__main__:main"
 include = ["stratadb*"]
 
 [tool.setuptools.package-data]
-stratadb = ["console.html", "py.typed"]
+stratadb = ["console.html", "py.typed", "native/hnsw.c"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

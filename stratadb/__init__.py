@@ -3,8 +3,8 @@
 from .collection import Collection, CollectionConfig
 from .database import Database
 from .filters import FilterError, compile_filter
-from .hnsw import HNSWIndex
+from .hnsw import HNSWIndex, NativeHNSWIndex, PyHNSWIndex
 
 __version__ = "0.7.0"
 
-__all__ = ["Collection", "CollectionConfig", "Database", "FilterError", "HNSWIndex", "compile_filter"]
+__all__ = ["Collection", "CollectionConfig", "Database", "FilterError", "HNSWIndex", "NativeHNSWIndex", "PyHNSWIndex", "compile_filter"]

@@ -21,7 +21,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]" pyflakes
       - run: python -m pyflakes stratadb tests bench examples
+      - run: python -m stratadb.native   # fails if the C library did not build
       - run: pytest -q
+      - run: STRATADB_NATIVE=0 pytest -q   # pure-Python fallback
       - run: python examples/quickstart.py && python examples/graph_retrieval.py
 
   # macOS minutes are billed at 10x on private repos and the jobs get
@@ -40,4 +42,5 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
+      - run: python -m stratadb.native
       - run: pytest -q
