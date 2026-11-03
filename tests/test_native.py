@@ -36,6 +36,9 @@ def test_recall_matches_python_index(metric):
     py.add_batch(data)
     assert recall(nat, queries, ef=64) >= recall(py, queries, ef=64) - 0.03
     assert recall(nat, queries, ef=128) >= 0.9
+    # ef is honoured below the default of 64 too (a small ef must cost recall).
+    assert recall(nat, queries, ef=10, k=10) < recall(nat, queries, ef=200, k=10)
+    assert recall(nat, queries, ef=10, k=10) == pytest.approx(recall(py, queries, ef=10, k=10), abs=0.1)
 
 
 @pytest.mark.parametrize("metric", ["cosine", "l2", "ip"])

@@ -556,7 +556,7 @@ EXPORT int64_t hnsw_search(const hnsw_t *h, const float *query, int64_t k, int64
     float *q = (float *)malloc(sizeof(float) * (size_t)h->dim);
     if (!q) return -1;
     prepare(h, query, q);
-    if (ef < 64) ef = 64;
+    if (ef <= 0) ef = 64;  /* unset: the same default as the Python index */
     if (ef < k) ef = k;
     pair_t entry = { dist(h, q, h->entry), h->entry };
     for (;;) {

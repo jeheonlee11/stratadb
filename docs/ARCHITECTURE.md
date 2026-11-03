@@ -109,6 +109,26 @@ merged. Each sealed segment picks a plan:
 | filter matches few records | exact scan over the matches |
 | otherwise | HNSW, with the filter checked during the walk; `ef` widens until k allowed hits are found |
 
+**Filters become column masks.** A filter is compiled once into a predicate
+over a metadata dict (`filters.py`), which the planner still uses for
+single-record checks. For selecting records out of a segment, though, calling
+that predicate once per record is the dominant cost on a large segment, so
+segments keep columns (`columns.py`): the first filter that mentions a field
+turns it into a float64 array for its numeric values, an int32 array of codes
+into the field's distinct non-numeric values (strings, None, ...), and two
+bit masks (field present; value is something the arrays can't compare, such
+as a list). Every operator then runs as a few numpy comparisons, with
+`$contains`/`$prefix` evaluated once per distinct value and spread through the
+codes, and only the rows the arrays can't decide handed to the predicate.
+Python's equality rules are kept exactly (`1 == 1.0 == True`, NaN equals
+nothing, a missing field fails everything but `$ne`/`$nin`/`$exists: False`,
+incompatible comparisons never match), and `tests/test_columns.py` checks
+every operator against the predicate row for row on awkward values. Sealed
+segments never change, so their columns are built once; growing segments
+append to theirs and re-derive rows that were overwritten or deleted.
+Filtered search on 100k x 384 vectors without a metadata index went from
+24.7 ms to 1.4 ms.
+
 The exact-scan threshold exists because a numpy matrix product over a small
 segment is both fast and exact: below a couple of million floats it ties or
 beats the graph walk even with the native index (at 384 dimensions the two
