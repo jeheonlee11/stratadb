@@ -369,7 +369,13 @@ class PyHNSWIndex:
 class NativeHNSWIndex:
     """HNSW index backed by ``native/hnsw.c``. Same API and file format as
     ``PyHNSWIndex``; vectors live in C memory (or in a memory map after a
-    ``load(mmap=True)``)."""
+    ``load(mmap=True)``).
+
+    ``quantize()`` adds 8-bit codes for the stored vectors (``codes.npy`` next
+    to ``index.npz`` once saved). Searches then walk the graph on the codes, a
+    quarter of the memory traffic, and re-rank what they found with the exact
+    vectors, so returned distances are exact. ``PyHNSWIndex`` ignores the codes.
+    """
 
     _METRIC_CODES = {"cosine": 0, "ip": 1, "l2": 2}
 
@@ -396,6 +402,7 @@ class NativeHNSWIndex:
         self.level_mult = 1.0 / math.log(m)
         self._rng = np.random.default_rng(seed)
         self._vectors: np.ndarray | None = None  # external (memory-mapped) storage, if any
+        self._codes: np.ndarray | None = None    # external (memory-mapped) codes, if any
         self._readonly = False
         self._h = lib.hnsw_new(dim, self._METRIC_CODES[metric], m, self.ef_construction, max(1, capacity))
         if not self._h:
@@ -496,6 +503,38 @@ class NativeHNSWIndex:
     def deleted_labels(self) -> list[int]:
         return self._deleted().tolist()
 
+    # ----------------------------------------------------------- quantization
+    @property
+    def quantized(self) -> bool:
+        return bool(self._lib.hnsw_quantized(self._h))
+
+    def quantize(self) -> None:
+        """Build 8-bit scalar codes (per-dimension min/max) for the stored
+        vectors. Adding vectors afterwards drops them; call again when done."""
+        if self._lib.hnsw_quantize(self._h) != 0:
+            raise MemoryError("native HNSW quantization failed")
+        self._codes = None
+
+    def _qarray(self, getter, shape, ctype, dtype) -> np.ndarray:
+        ptr = ctypes.cast(getter(self._h), ctypes.POINTER(ctype))
+        return np.array(np.ctypeslib.as_array(ptr, shape=shape), dtype=dtype)
+
+    def _quant_params(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        n = len(self)
+        return (self._qarray(self._lib.hnsw_qmin, (self.dim,), ctypes.c_float, np.float32),
+                self._qarray(self._lib.hnsw_qscale, (self.dim,), ctypes.c_float, np.float32),
+                self._qarray(self._lib.hnsw_qnorm, (n,), ctypes.c_float, np.float32))
+
+    @property
+    def codes(self) -> np.ndarray | None:
+        """The ``(n, dim)`` uint8 codes, or None when not quantized."""
+        if not self.quantized:
+            return None
+        if self._codes is not None:
+            return self._codes
+        ptr = ctypes.cast(self._lib.hnsw_codes(self._h), ctypes.POINTER(ctypes.c_uint8))
+        return np.ctypeslib.as_array(ptr, shape=(len(self), self.dim))
+
     # ----------------------------------------------------------------- search
     def search(
         self,
@@ -571,6 +610,13 @@ class NativeHNSWIndex:
             arrays["vectors"] = vectors
         else:
             np.save(vectors_path, vectors)
+        if self.quantized and n:
+            qmin, qscale, qnorm = self._quant_params()
+            arrays.update(quant_min=qmin, quant_scale=qscale, quant_norm=qnorm)
+            if vectors_path is None:
+                arrays["codes"] = np.ascontiguousarray(self.codes)
+            else:
+                np.save(Path(vectors_path).with_name("codes.npy"), np.ascontiguousarray(self.codes))
         ep = self.entry_point
         np.savez(
             path,
@@ -606,6 +652,18 @@ class NativeHNSWIndex:
             deleted = np.zeros(n, dtype=np.uint8)
             if len(data["deleted"]):
                 deleted[np.asarray(data["deleted"], dtype=np.int64)] = 1
+            quant = None
+            if "quant_min" in data:
+                if "codes" in data:
+                    codes, codes_external = np.ascontiguousarray(data["codes"], dtype=np.uint8), None
+                else:
+                    loaded = np.load(path.with_name("codes.npy"), mmap_mode="r" if mmap else None)
+                    codes = np.asarray(loaded)
+                    codes_external = codes if mmap else None
+                quant = (codes, codes_external,
+                         np.ascontiguousarray(data["quant_min"], dtype=np.float32),
+                         np.ascontiguousarray(data["quant_scale"], dtype=np.float32),
+                         np.ascontiguousarray(data["quant_norm"], dtype=np.float32))
         if n == 0:
             return idx
         if vectors.shape != (n, dim):
@@ -618,6 +676,16 @@ class NativeHNSWIndex:
         if external is not None:
             idx._vectors = external  # keep the mapping alive; C reads from it
             idx._readonly = True
+        if quant is not None:
+            codes, codes_external, qmin, qscale, qnorm = quant
+            if codes.shape != (n, dim):
+                raise ValueError(f"codes have shape {codes.shape}, expected {(n, dim)}")
+            rc = idx._lib.hnsw_import_codes(idx._h, cls._ptr(codes), 0 if codes_external is not None else 1,
+                                            cls._ptr(qmin), cls._ptr(qscale), cls._ptr(qnorm))
+            if rc != 0:
+                raise MemoryError("native HNSW code import failed")
+            if codes_external is not None:
+                idx._codes = codes_external
         return idx
 
 

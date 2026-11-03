@@ -51,10 +51,10 @@ def test_two_segments_build_concurrently(tmp_path, monkeypatch):
     import threading
 
     started, release = threading.Semaphore(0), threading.Event()
-    def gated(cls, seg_id, path, records, metric, m, efc, pool):
+    def gated(cls, seg_id, path, records, metric, m, efc, pool, sq8=True):
         started.release()
         release.wait(10)
-        return SealedSegment.build(seg_id, path, records, metric, m, efc)  # avoid a real pool here
+        return SealedSegment.build(seg_id, path, records, metric, m, efc, sq8)  # avoid a real pool here
 
     monkeypatch.setattr(SealedSegment, "build_in_process", classmethod(gated))
     col = Collection(tmp_path / "c", CollectionConfig(dim=8, seal_threshold=100, build_processes=2,

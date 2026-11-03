@@ -170,7 +170,7 @@ class GrowingSegment:
 
 
 def build_segment_files(path: Path, vectors: np.ndarray, ids: list[str], metas: list[dict],
-                        metric: str, m: int, ef_construction: int) -> None:
+                        metric: str, m: int, ef_construction: int, sq8: bool = True) -> None:
     """Build an HNSW index over ``vectors`` and write the segment directory.
 
     Module-level so it can run in a worker process. Writes into a temporary
@@ -181,6 +181,8 @@ def build_segment_files(path: Path, vectors: np.ndarray, ids: list[str], metas: 
     index = HNSWIndex(vectors.shape[1], metric=metric, m=m, ef_construction=ef_construction,
                       capacity=max(1, len(vectors)))
     index.add_batch(vectors)  # one call into the native library when it is loaded
+    if sq8 and hasattr(index, "quantize"):
+        index.quantize()
     tmp = path.with_name(path.name + ".building")
     shutil.rmtree(tmp, ignore_errors=True)
     tmp.mkdir(parents=True)
@@ -225,28 +227,29 @@ class SealedSegment:
         metric: str,
         m: int,
         ef_construction: int,
+        sq8: bool = True,
     ) -> "SealedSegment":
         ids = [rid for rid, _, _ in records]
         metas = [meta for _, _, meta in records]
         vectors = np.stack([vec for _, vec, _ in records])
-        build_segment_files(path, vectors, ids, metas, metric, m, ef_construction)
+        build_segment_files(path, vectors, ids, metas, metric, m, ef_construction, sq8)
         return cls.load(seg_id, path, [])
 
     @classmethod
-    def submit_build(cls, path, records, metric, m, ef_construction, pool):
+    def submit_build(cls, path, records, metric, m, ef_construction, pool, sq8=True):
         """Start building a segment in a worker process; returns the future.
         Pair with ``load(seg_id, path, [])`` once the future completes."""
         ids = [rid for rid, _, _ in records]
         metas = [meta for _, _, meta in records]
         vectors = np.stack([vec for _, vec, _ in records])
-        return pool.submit(build_segment_files, path, vectors, ids, metas, metric, m, ef_construction)
+        return pool.submit(build_segment_files, path, vectors, ids, metas, metric, m, ef_construction, sq8)
 
     @classmethod
-    def build_in_process(cls, seg_id, path, records, metric, m, ef_construction, pool) -> "SealedSegment":
+    def build_in_process(cls, seg_id, path, records, metric, m, ef_construction, pool, sq8=True) -> "SealedSegment":
         """Like ``build`` but the index is built in a worker process from ``pool``
         (a ``concurrent.futures`` executor), so it uses another CPU core and
         never contends for this process's GIL."""
-        cls.submit_build(path, records, metric, m, ef_construction, pool).result()
+        cls.submit_build(path, records, metric, m, ef_construction, pool, sq8).result()
         return cls.load(seg_id, path, [])
 
     @classmethod

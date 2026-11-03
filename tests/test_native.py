@@ -171,3 +171,71 @@ def test_native_is_the_default_when_loaded():
 
     assert HNSWIndex is NativeHNSWIndex
     assert "loaded" in native.status()
+
+
+def test_quantized_search_matches_float_results(tmp_path):
+    data = clustered(4000, 48, seed=5)
+    queries = clustered(60, 48, seed=6)
+    idx = NativeHNSWIndex(48, m=16, ef_construction=128)
+    idx.add_batch(data)
+    before = [idx.search(q, 10, ef=96) for q in queries]
+    assert not idx.quantized and idx.codes is None
+    idx.quantize()
+    assert idx.quantized and idx.codes.shape == (4000, 48) and idx.codes.dtype == np.uint8
+    after = [idx.search(q, 10, ef=96) for q in queries]
+    # The codes pick the candidates, the floats rank them: distances are exact
+    # and recall stays within noise of the float walk.
+    rec_before = recall(idx, queries, ef=96)
+    for q, hits in zip(queries, after):
+        exact = dict(idx.brute_force(q, 4000))
+        for label, d in hits:
+            assert d == pytest.approx(exact[label], rel=1e-5)
+    overlap = np.mean([len({l for l, _ in a} & {l for l, _ in b}) / 10 for a, b in zip(before, after)])
+    assert overlap >= 0.9 and recall(idx, queries, ef=96) >= rec_before - 0.02
+    idx.add(data[0])                # new vectors invalidate the codes
+    assert not idx.quantized
+    idx.quantize()
+    assert idx.quantized and idx.search(data[0], 1)[0][1] == pytest.approx(0, abs=1e-5)
+
+
+@pytest.mark.parametrize("split_vectors", [False, True])
+@pytest.mark.parametrize("mmap", [False, True])
+def test_quantized_index_round_trips_and_python_ignores_codes(tmp_path, split_vectors, mmap):
+    data = clustered(700, 16, seed=2)
+    idx = NativeHNSWIndex(16, metric="l2")
+    idx.add_batch(data)
+    idx.quantize()
+    idx.mark_deleted(3)
+    vectors_path = tmp_path / "vectors.npy" if split_vectors else None
+    idx.save(tmp_path / "index.npz", vectors_path)
+    assert (tmp_path / "codes.npy").exists() == split_vectors
+    if mmap and not split_vectors:
+        pytest.skip("mmap needs the split layout")
+    loaded = NativeHNSWIndex.load(tmp_path / "index.npz", mmap=mmap)
+    assert loaded.quantized and np.array_equal(loaded.codes, idx.codes) and loaded.is_deleted(3)
+    if mmap:
+        assert isinstance(loaded._codes.base, np.memmap)
+    for q in data[:30]:
+        assert loaded.search(q, 5, ef=64) == idx.search(q, 5, ef=64)
+    py = PyHNSWIndex.load(tmp_path / "index.npz", mmap=mmap)
+    assert len(py) == 700 and py.is_deleted(3)
+    assert [l for l, _ in py.search(data[7], 5, ef=64)] == [l for l, _ in loaded.search(data[7], 5, ef=64)]
+
+
+def test_sealed_segments_are_quantized_by_default(tmp_path):
+    from stratadb import Collection, CollectionConfig
+
+    data = clustered(600, 16, seed=9)
+    for sq8 in (True, False):
+        col = Collection(tmp_path / f"c{sq8}", CollectionConfig(dim=16, seal_threshold=300, background_seal=False,
+                                                                 build_processes=0, sq8=sq8))
+        col.upsert([f"r{i}" for i in range(600)], data)
+        segs = list(col.sealed.values())
+        assert len(segs) == 2 and all(s.index.quantized == sq8 for s in segs)
+        assert all((s.path / "codes.npy").exists() == sq8 for s in segs)
+        assert col.search(data[17], 1)[0]["id"] == "r17"
+        col.close()
+        again = Collection(tmp_path / f"c{sq8}")
+        assert all(s.index.quantized == sq8 for s in again.sealed.values())
+        assert again.search(data[17], 1)[0]["id"] == "r17"
+        again.close()

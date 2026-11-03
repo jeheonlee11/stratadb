@@ -52,6 +52,16 @@ class CollectionConfig:
     m: int = 16
     ef_construction: int = 128
     ef_search: int = 64
+    # Sealed segments keep 8-bit codes of their vectors next to the float32
+    # originals. Searches walk the graph on the codes (a quarter of the memory
+    # traffic) and re-rank the candidates with the floats, so results and
+    # distances stay exact for what the walk found. Needs the native index;
+    # the numpy index ignores the codes.
+    sq8: bool = True
+    # A query searches sealed segments on this many threads at once (the
+    # native index releases the GIL). 0 or 1 searches them one after another,
+    # which is also what happens with the numpy index.
+    search_threads: int = 4
     seal_threshold: int = 16384
     sync: str = "flush"
     wal_checkpoint_bytes: int = 64 * 1024 * 1024
@@ -144,6 +154,7 @@ class Collection:
         self._compact_thread: threading.Thread | None = None
         self._pool = None
         self._pool_broken = False
+        self._search_pool = None
         self._compacting: set[int] = set()
         self.text_index: BM25Index | None = BM25Index() if self.config.text_field else None
         self.meta_index: MetaIndex | None = MetaIndex(self.config.index_fields) if self.config.index_fields else None
@@ -570,10 +581,22 @@ class Collection:
                 hits = self.growing.search(q, pool_k, seg_pred, cands, seg_expr)
                 for frozen in self.frozen.values():
                     hits.extend(frozen.search(q, pool_k, seg_pred, cands, seg_expr))
-                for seg in self.sealed.values():
-                    hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=seg_pred,
-                                           exact_limit=self.config.exact_search_limit, candidates=cands,
-                                           filter_expr=seg_expr))
+                def search_sealed(seg):
+                    return seg.search(q, pool_k, ef=max(ef, pool_k), pred=seg_pred,
+                                      exact_limit=self.config.exact_search_limit, candidates=cands,
+                                      filter_expr=seg_expr)
+
+                sealed = list(self.sealed.values())
+                big = sum(len(s) * self.config.dim > self.config.exact_search_limit for s in sealed)
+                searcher = self._search_executor() if big > 1 else None
+                if searcher is None:
+                    for seg in sealed:
+                        hits.extend(search_sealed(seg))
+                else:
+                    # Graph walks in the native index run without the GIL, so
+                    # several segments' walks overlap on other cores.
+                    for found in searcher.map(search_sealed, sealed):
+                        hits.extend(found)
                 hits.sort()
                 scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits[:pool_k]]
                 if graph_boost > 0 and scored:
@@ -789,13 +812,13 @@ class Collection:
         pool = self._executor() if len(records) >= self.config.build_process_min_records else None
         if pool is not None:
             try:
-                return SealedSegment.build_in_process(*args, pool)
+                return SealedSegment.build_in_process(*args, pool, sq8=self.config.sq8)
             except Exception:  # noqa: BLE001 - worker died (e.g. spawn can't re-import __main__)
                 log.warning("worker-process build failed for %s; building in-process instead",
                             self.name, exc_info=True)
                 self._pool = None
                 self._pool_broken = True
-        return SealedSegment.build(*args)
+        return SealedSegment.build(*args, sq8=self.config.sq8)
 
     def _build_segments(self, chunks) -> list:
         """Build several segments, concurrently in worker processes when available."""
@@ -808,7 +831,8 @@ class Collection:
             for seg_id, chunk in chunks:
                 path = self.path / f"seg-{seg_id}"
                 futures[seg_id] = SealedSegment.submit_build(
-                    path, chunk, self.config.metric, self.config.m, self.config.ef_construction, pool)
+                    path, chunk, self.config.metric, self.config.m, self.config.ef_construction, pool,
+                    self.config.sq8)
             for f in futures.values():
                 f.result()
             return [SealedSegment.load(seg_id, self.path / f"seg-{seg_id}", []) for seg_id, _ in chunks]
@@ -818,6 +842,16 @@ class Collection:
             self._pool = None
             self._pool_broken = True
             return [self._build_segment(seg_id, chunk) for seg_id, chunk in chunks]
+
+    def _search_executor(self):
+        if self.config.search_threads <= 1 or not native.available():
+            return None
+        if self._search_pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._search_pool = ThreadPoolExecutor(max_workers=self.config.search_threads,
+                                                   thread_name_prefix=f"stratadb-search-{self.name}")
+        return self._search_pool
 
     def _executor(self):
         if self.config.build_processes <= 0 or self._pool_broken:
@@ -1266,3 +1300,6 @@ class Collection:
             # this process briefly and keep inherited pipes open.
             self._pool.shutdown(wait=True, cancel_futures=True)
             self._pool = None
+        if self._search_pool is not None:
+            self._search_pool.shutdown(wait=True)
+            self._search_pool = None

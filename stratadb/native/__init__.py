@@ -52,6 +52,13 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
         "hnsw_links_total": (c.c_int64, [p]),
         "hnsw_export_links": (None, [p, p, p]),
         "hnsw_import": (c.c_int, [p, c.c_int64, p, c.c_int, p, p, p, p, c.c_int32, c.c_int32]),
+        "hnsw_quantize": (c.c_int, [p]),
+        "hnsw_import_codes": (c.c_int, [p, p, c.c_int, p, p, p]),
+        "hnsw_quantized": (c.c_int, [p]),
+        "hnsw_codes": (p, [p]),
+        "hnsw_qmin": (p, [p]),
+        "hnsw_qscale": (p, [p]),
+        "hnsw_qnorm": (p, [p]),
     }
     for name, (restype, argtypes) in sig.items():
         fn = getattr(lib, name)

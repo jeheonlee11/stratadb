@@ -49,6 +49,14 @@ typedef struct {
     int64_t n_deleted;
     int32_t entry;
     int32_t max_level;
+    /* Optional 8-bit scalar quantization of the stored vectors: code c in
+     * dimension i decodes to qmin[i] + c * qscale[i]. Searches walk the graph
+     * on the codes (a quarter of the memory traffic) and re-rank the
+     * candidates they found with the exact float vectors. */
+    uint8_t *codes;        /* n x dim, or NULL */
+    int owns_codes;
+    float *qmin, *qscale;  /* dim */
+    float *qnorm;          /* n: squared norm of each decoded vector (for l2) */
 } hnsw_t;
 
 typedef struct {
@@ -140,6 +148,51 @@ static inline float dist_vec(const hnsw_t *h, const float *q, const float *v) {
 }
 
 static inline const float *vec(const hnsw_t *h, int64_t label) { return h->vectors + label * (int64_t)h->dim; }
+
+/* Query-side state for searching on codes. With qdot = sum(q[i]*qscale[i]*c[i]),
+ * dot(q, x) = sum(q[i]*qmin[i]) + qdot, so the per-query constant and the
+ * scaled query are computed once. */
+typedef struct {
+    float *qs;      /* q[i] * qscale[i] */
+    float c0;       /* sum q[i] * qmin[i] */
+    float qq;       /* ||q||^2, for l2 */
+} qquery_t;
+
+static inline float dot_u8(const float *a, const uint8_t *c, int d) {
+    float s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, s5 = 0, s6 = 0, s7 = 0;
+    int i = 0;
+    for (; i + 8 <= d; i += 8) {
+        s0 += a[i] * c[i]; s1 += a[i + 1] * c[i + 1]; s2 += a[i + 2] * c[i + 2]; s3 += a[i + 3] * c[i + 3];
+        s4 += a[i + 4] * c[i + 4]; s5 += a[i + 5] * c[i + 5]; s6 += a[i + 6] * c[i + 6]; s7 += a[i + 7] * c[i + 7];
+    }
+    for (; i < d; i++) s0 += a[i] * c[i];
+    return hsum(s0, s1, s2, s3, s4, s5, s6, s7);
+}
+
+static inline const uint8_t *code(const hnsw_t *h, int64_t label) { return h->codes + label * (int64_t)h->dim; }
+
+static inline float qdist(const hnsw_t *h, const qquery_t *qq, int64_t label) {
+    float d = qq->c0 + dot_u8(qq->qs, code(h, label), h->dim);
+    switch (h->metric) {
+    case METRIC_L2: return qq->qq + h->qnorm[label] - 2.0f * d;
+    case METRIC_IP: return -d;
+    default: return 1.0f - d;
+    }
+}
+
+static int qquery_init(const hnsw_t *h, const float *q, qquery_t *out) {
+    out->qs = (float *)malloc(sizeof(float) * (size_t)h->dim);
+    if (!out->qs) return -1;
+    float c0 = 0, qq = 0;
+    for (int i = 0; i < h->dim; i++) {
+        out->qs[i] = q[i] * h->qscale[i];
+        c0 += q[i] * h->qmin[i];
+        qq += q[i] * q[i];
+    }
+    out->c0 = c0;
+    out->qq = qq;
+    return 0;
+}
 
 /* Touch a vector's first cache line before it is needed. Random rows of a
  * large index are DRAM round trips (about 4x the arithmetic at 384 dims);
@@ -261,8 +314,8 @@ static int cmp_pair(const void *x, const void *y) {
  * starting points; the ef closest nodes found land in `out`, sorted
  * ascending. Returns the count, or -1 on allocation failure. `res` is a
  * max-heap (stored as a min-heap on -d). */
-static int search_layer(const hnsw_t *h, const float *q, const pair_t *entries, int ne, int ef, int level,
-                        pair_t *out) {
+static int search_layer(const hnsw_t *h, const float *q, const qquery_t *qq, const pair_t *entries, int ne,
+                        int ef, int level, pair_t *out) {
     uint32_t epoch;
     uint32_t *visited = visited_for(h->n, &epoch);
     if (!visited) return -1;
@@ -287,12 +340,14 @@ static int search_layer(const hnsw_t *h, const float *q, const pair_t *entries, 
         int k = *cnt;
         float worst = -res.a[0].d;
         for (int j = 0; j < k; j++)
-            if (visited[nb[j]] != epoch) prefetch_vec(h, nb[j]);
+            if (visited[nb[j]] != epoch) {
+                if (qq) __builtin_prefetch(code(h, nb[j]), 0, 1); else prefetch_vec(h, nb[j]);
+            }
         for (int j = 0; j < k; j++) {
             int32_t n = nb[j];
             if (visited[n] == epoch) continue;
             visited[n] = epoch;
-            float nd = dist(h, q, n);
+            float nd = qq ? qdist(h, qq, n) : dist(h, q, n);
             if (res.n < ef || nd < worst) {
                 if (heap_push(&cand, nd, n) || heap_push(&res, -nd, n)) goto oom;
                 if (res.n > ef) heap_pop(&res);
@@ -418,7 +473,21 @@ EXPORT void hnsw_free(hnsw_t *h) {
     free(h->upper);
     free(h->upper_cnt);
     free(h->deleted);
+    if (h->owns_codes) free(h->codes);
+    free(h->qmin);
+    free(h->qscale);
+    free(h->qnorm);
     free(h);
+}
+
+static void drop_codes(hnsw_t *h) {
+    if (h->owns_codes) free(h->codes);
+    free(h->qmin);
+    free(h->qscale);
+    free(h->qnorm);
+    h->codes = NULL;
+    h->qmin = h->qscale = h->qnorm = NULL;
+    h->owns_codes = 0;
 }
 
 EXPORT int64_t hnsw_len(const hnsw_t *h) { return h->n; }
@@ -481,14 +550,14 @@ static int link_node(hnsw_t *h, int64_t label) {
     entries[0].d = dist(h, q, h->entry);
 
     for (int lc = h->max_level; lc > level; lc--) {
-        int nf = search_layer(h, q, entries, ne, 1, lc, found);
+        int nf = search_layer(h, q, NULL, entries, ne, 1, lc, found);
         if (nf < 0) { free(entries); free(found); return -1; }
         entries[0] = found[0];
         ne = 1;
     }
     int top = level < h->max_level ? level : h->max_level;
     for (int lc = top; lc >= 0; lc--) {
-        int nf = search_layer(h, q, entries, ne, efc, lc, found);
+        int nf = search_layer(h, q, NULL, entries, ne, efc, lc, found);
         if (nf < 0) { free(entries); free(found); return -1; }
         int m_max = lc == 0 ? h->m0 : h->m;
         int32_t *cnt, *mine;
@@ -534,6 +603,7 @@ static int link_node(hnsw_t *h, int64_t label) {
  * a negative error (-1 allocation, -2 read-only). */
 EXPORT int64_t hnsw_add_batch(hnsw_t *h, const float *vectors, const int32_t *levels, int64_t count) {
     int64_t first = h->n;
+    if (count > 0 && h->codes) drop_codes(h);  /* codes describe a fixed set of vectors */
     for (int64_t i = 0; i < count; i++) {
         int64_t label;
         int rc = append_node(h, vectors + i * (int64_t)h->dim, levels[i], &label);
@@ -558,18 +628,28 @@ EXPORT int64_t hnsw_search(const hnsw_t *h, const float *query, int64_t k, int64
     prepare(h, query, q);
     if (ef <= 0) ef = 64;  /* unset: the same default as the Python index */
     if (ef < k) ef = k;
-    pair_t entry = { dist(h, q, h->entry), h->entry };
+    qquery_t qqs, *qq = NULL;
+    if (h->codes) {
+        if (qquery_init(h, q, &qqs) != 0) { free(q); return -1; }
+        qq = &qqs;
+    }
+    pair_t entry = { qq ? qdist(h, qq, h->entry) : dist(h, q, h->entry), h->entry };
     for (;;) {
         if (ef > h->n) ef = h->n;
         pair_t *found = (pair_t *)malloc(sizeof(pair_t) * (size_t)(ef + 1));
-        if (!found) { free(q); return -1; }
+        if (!found) { free(q); if (qq) free(qq->qs); return -1; }
         pair_t e = entry;
         for (int lc = h->max_level; lc > 0; lc--) {
-            if (search_layer(h, q, &e, 1, 1, lc, found) < 0) { free(found); free(q); return -1; }
+            if (search_layer(h, q, qq, &e, 1, 1, lc, found) < 0) { free(found); free(q); if (qq) free(qq->qs); return -1; }
             e = found[0];
         }
-        int nf = search_layer(h, q, &e, 1, (int)ef, 0, found);
-        if (nf < 0) { free(found); free(q); return -1; }
+        int nf = search_layer(h, q, qq, &e, 1, (int)ef, 0, found);
+        if (nf < 0) { free(found); free(q); if (qq) free(qq->qs); return -1; }
+        if (qq) {
+            /* The codes chose the candidates; the floats rank them. */
+            for (int i = 0; i < nf; i++) found[i].d = dist(h, q, found[i].id);
+            qsort(found, (size_t)nf, sizeof(pair_t), cmp_pair);
+        }
         int64_t hits = 0;
         for (int i = 0; i < nf && hits < k; i++) {
             int32_t id = found[i].id;
@@ -590,7 +670,7 @@ EXPORT int64_t hnsw_search(const hnsw_t *h, const float *query, int64_t k, int64
             if (total >= k) enough = 1;
         }
         free(found);
-        if (enough) { free(q); return hits; }
+        if (enough) { free(q); if (qq) free(qq->qs); return hits; }
         ef *= 4;
     }
 }
@@ -692,3 +772,87 @@ EXPORT int hnsw_import(hnsw_t *h, int64_t n, const float *vectors, int copy, con
     h->max_level = max_level;
     return 0;
 }
+
+/* ---------------------------------------------------------- quantization */
+
+/* Build 8-bit codes for every stored vector: per-dimension min/max over the
+ * data, 255 steps between. Returns 0, or -1 on allocation failure. */
+EXPORT int hnsw_quantize(hnsw_t *h) {
+    int d = h->dim;
+    int64_t n = h->n;
+    if (n == 0) return 0;
+    drop_codes(h);
+    uint8_t *codes = (uint8_t *)malloc((size_t)n * (size_t)d);
+    float *qmin = (float *)malloc(sizeof(float) * (size_t)d);
+    float *qmax = (float *)malloc(sizeof(float) * (size_t)d);
+    float *qscale = (float *)malloc(sizeof(float) * (size_t)d);
+    float *qnorm = (float *)malloc(sizeof(float) * (size_t)n);
+    if (!codes || !qmin || !qmax || !qscale || !qnorm) {
+        free(codes); free(qmin); free(qmax); free(qscale); free(qnorm);
+        return -1;
+    }
+    for (int i = 0; i < d; i++) { qmin[i] = FLT_MAX; qmax[i] = -FLT_MAX; }
+    for (int64_t r = 0; r < n; r++) {
+        const float *v = vec(h, r);
+        for (int i = 0; i < d; i++) {
+            if (v[i] < qmin[i]) qmin[i] = v[i];
+            if (v[i] > qmax[i]) qmax[i] = v[i];
+        }
+    }
+    for (int i = 0; i < d; i++) qscale[i] = (qmax[i] - qmin[i]) / 255.0f;
+    for (int64_t r = 0; r < n; r++) {
+        const float *v = vec(h, r);
+        uint8_t *c = codes + r * (int64_t)d;
+        float norm = 0;
+        for (int i = 0; i < d; i++) {
+            float t = qscale[i] > 0 ? (v[i] - qmin[i]) / qscale[i] : 0.0f;
+            int ci = (int)(t + 0.5f);
+            if (ci < 0) ci = 0;
+            if (ci > 255) ci = 255;
+            c[i] = (uint8_t)ci;
+            float x = qmin[i] + ci * qscale[i];
+            norm += x * x;
+        }
+        qnorm[r] = norm;
+    }
+    free(qmax);
+    h->codes = codes;
+    h->owns_codes = 1;
+    h->qmin = qmin;
+    h->qscale = qscale;
+    h->qnorm = qnorm;
+    return 0;
+}
+
+/* Attach codes computed earlier (e.g. memory-mapped from codes.npy). With
+ * copy == 0 the codes stay in the caller's buffer, which must outlive the
+ * index. qmin/qscale/qnorm are always copied. */
+EXPORT int hnsw_import_codes(hnsw_t *h, const uint8_t *codes, int copy, const float *qmin, const float *qscale,
+                             const float *qnorm) {
+    int d = h->dim;
+    int64_t n = h->n;
+    drop_codes(h);
+    h->qmin = (float *)malloc(sizeof(float) * (size_t)d);
+    h->qscale = (float *)malloc(sizeof(float) * (size_t)d);
+    h->qnorm = (float *)malloc(sizeof(float) * (size_t)n);
+    if (!h->qmin || !h->qscale || !h->qnorm) { drop_codes(h); return -1; }
+    memcpy(h->qmin, qmin, sizeof(float) * (size_t)d);
+    memcpy(h->qscale, qscale, sizeof(float) * (size_t)d);
+    memcpy(h->qnorm, qnorm, sizeof(float) * (size_t)n);
+    if (copy) {
+        h->codes = (uint8_t *)malloc((size_t)n * (size_t)d);
+        if (!h->codes) { drop_codes(h); return -1; }
+        memcpy(h->codes, codes, (size_t)n * (size_t)d);
+        h->owns_codes = 1;
+    } else {
+        h->codes = (uint8_t *)codes;
+        h->owns_codes = 0;
+    }
+    return 0;
+}
+
+EXPORT int hnsw_quantized(const hnsw_t *h) { return h->codes != NULL; }
+EXPORT const uint8_t *hnsw_codes(const hnsw_t *h) { return h->codes; }
+EXPORT const float *hnsw_qmin(const hnsw_t *h) { return h->qmin; }
+EXPORT const float *hnsw_qscale(const hnsw_t *h) { return h->qscale; }
+EXPORT const float *hnsw_qnorm(const hnsw_t *h) { return h->qnorm; }
