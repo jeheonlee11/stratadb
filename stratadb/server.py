@@ -32,6 +32,7 @@ Endpoints, all JSON in and out::
     POST   /collections/<name>/merge       {max_segments?}
     POST   /collections/<name>/tune_ef     {target_recall?, k?, samples?, apply?}
     GET    /collections/<name>/export      streams JSON lines (see Collection.export_jsonl)
+    POST   /collections/<name>/import      body is JSON lines (the export format); upserts
 
 With ``api_key`` set, every request except ``/health`` needs
 ``Authorization: Bearer <key>``.
@@ -251,6 +252,40 @@ def make_handler(api: Api, api_key: str | None):
             col.export_jsonl(Chunked())
             out.write(b"0\r\n\r\n")
 
+        def _recv_import(self, name: str) -> None:
+            """Load JSON lines from the request body (Content-Length or chunked)."""
+            try:
+                col = api._col(name)
+            except ApiError as e:
+                self._send(e.status, {"error": str(e)})
+                return
+            rfile = self.rfile
+            if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+                def lines():
+                    buf = b""
+                    while True:
+                        size = int(rfile.readline().strip() or b"0", 16)
+                        if size == 0:
+                            rfile.readline()
+                            break
+                        buf += rfile.read(size)
+                        rfile.readline()
+                        while b"\n" in buf:
+                            line, buf = buf.split(b"\n", 1)
+                            yield line.decode()
+                    if buf.strip():
+                        yield buf.decode()
+            else:
+                length = int(self.headers.get("Content-Length") or 0)
+                def lines():
+                    yield from rfile.read(length).decode().splitlines()
+            try:
+                counts = col.import_jsonl(lines())
+            except (ValueError, TypeError) as e:
+                self._send(400, {"error": str(e)})
+                return
+            self._send(200, {"imported": counts})
+
         def _dispatch(self, method: str) -> None:
             path = self.path.split("?")[0]
             if method == "GET" and path in ("/", "/console"):
@@ -269,12 +304,16 @@ def make_handler(api: Api, api_key: str | None):
                 self.end_headers()
                 self.wfile.write(data)
                 return
-            if method == "GET" and len(parts) == 3 and parts[0] == "collections" and parts[2] == "export":
+            if len(parts) == 3 and parts[0] == "collections" and (
+                    (method == "GET" and parts[2] == "export") or (method == "POST" and parts[2] == "import")):
                 if api_key and not hmac.compare_digest(self.headers.get("Authorization", "").encode(),
                                                       f"Bearer {api_key}".encode()):
                     self._send(401, {"error": "missing or wrong API key"})
                     return
-                self._send_export(parts[1])
+                if method == "GET":
+                    self._send_export(parts[1])
+                else:
+                    self._recv_import(parts[1])
                 return
             action = parts[2] if len(parts) == 3 else (parts[0] if parts else "root")
             started = time.perf_counter()

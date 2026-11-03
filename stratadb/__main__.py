@@ -24,6 +24,15 @@ def main(argv=None) -> None:
                    help="require 'Authorization: Bearer <key>' (or set STRATADB_API_KEY)")
     p.add_argument("-v", "--verbose", action="store_true", help="log every request")
 
+    p = sub.add_parser("cluster", help="run a router over several StrataDB servers (shards + replicas)")
+    p.add_argument("config", help="cluster JSON: {\"shards\": [{\"nodes\": [url, ...]}, ...], \"api_key\"?}")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=7700)
+    p.add_argument("--api-key", default=os.environ.get("STRATADB_API_KEY"),
+                   help="key clients must send to the router (nodes use the key in the config)")
+    p.add_argument("--state", default=None, help="where the router keeps collection settings (default: next to config)")
+    p.add_argument("-v", "--verbose", action="store_true")
+
     for name, help_text in (("stats", "print collection stats"),
                             ("compact", "compact segments"),
                             ("merge", "merge all sealed segments into one"),
@@ -52,6 +61,13 @@ def main(argv=None) -> None:
                             format="%(asctime)s %(levelname)s %(message)s")
         from .server import serve
         serve(args.path, args.host, args.port, args.api_key)
+        return
+
+    if args.cmd == "cluster":
+        logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
+                            format="%(asctime)s %(levelname)s %(message)s")
+        from .cluster import serve_cluster
+        serve_cluster(args.config, args.host, args.port, args.api_key, args.state)
         return
 
     if args.cmd == "export":

@@ -45,6 +45,10 @@ class Client:
     def health(self) -> dict:
         return self._request("GET", "/health")
 
+    def cluster_status(self) -> dict:
+        """Shards, nodes and their state (only when ``url`` is a ``stratadb cluster`` router)."""
+        return self._request("GET", "/cluster")
+
     def list_collections(self) -> list[str]:
         return self._request("GET", "/collections")["collections"]
 

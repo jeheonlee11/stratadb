@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.0
+
+- **Cluster mode.** `stratadb cluster cluster.json` runs a router over any
+  number of `stratadb serve` nodes arranged as shards with replicas. It
+  speaks the single-node HTTP API: collections are hash-sharded by id (or
+  pinned to one shard with `sharding="none"` for whole-graph algorithms),
+  writes replicate synchronously within a shard, searches fan out and merge,
+  reads fail over to a replica when the primary is down, and a replica that
+  missed writes is re-synced from the primary when it returns (`GET
+  /cluster`, `POST /cluster/resync`, `Client.cluster_status()`).
+- `POST /collections/<name>/import` loads the JSON-lines export format over
+  HTTP (chunked or with a content length).
+
 ## 0.9.0
 
 - **8-bit scalar quantization** (`CollectionConfig.sq8`, default on). Sealed

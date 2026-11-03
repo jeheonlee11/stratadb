@@ -118,6 +118,12 @@ activation, so a weak, barely related match can't promote its neighbours.
 - **Online backups**: a point-in-time copy of a live database. **JSONL
   export/import** of records, nodes and edges for moving data between
   versions or tools.
+- **Clustering**: `stratadb cluster` runs a router over several servers.
+  Collections are hash-sharded across shards and replicated within each;
+  searches fan out and merge; a dead primary fails reads over to its replica,
+  and a replica that missed writes is re-synced from the primary when it
+  returns. Same HTTP API, so clients and the console need no changes
+  (see [Cluster](#cluster)).
 
 ## Install
 
@@ -314,6 +320,53 @@ the C one.
 
 Reproduce the synthetic runs with `python bench/ann_bench.py --data manifold`
 (or `--data clustered`).
+
+## Cluster
+
+Any number of `stratadb serve` processes become a cluster through a router:
+
+```bash
+stratadb serve --path ./a --port 7701 &      # shard 0, primary
+stratadb serve --path ./b --port 7702 &      # shard 0, replica
+stratadb serve --path ./c --port 7703 &      # shard 1, primary
+stratadb serve --path ./d --port 7704 &      # shard 1, replica
+cat > cluster.json <<'JSON'
+{"shards": [{"nodes": ["http://127.0.0.1:7701", "http://127.0.0.1:7702"]},
+            {"nodes": ["http://127.0.0.1:7703", "http://127.0.0.1:7704"]}]}
+JSON
+stratadb cluster cluster.json --port 7700
+```
+
+```python
+client = Client("http://127.0.0.1:7700")
+kb = client.create_collection("kb", dim=384)                    # hash-sharded by id (default)
+graph = client.create_collection("g", dim=64, sharding="none")  # whole collection on shard 0
+client.cluster_status()                                         # nodes: up / stale
+```
+
+- **Placement.** A record lives on shard `crc32(id) % shards`, on every node
+  of that shard. `sharding="none"` keeps a collection on one shard
+  (replicated), for collections whose graph algorithms (`shortest_path`,
+  `pagerank`, `components`) need every edge in one place.
+- **Writes** go to all nodes of the shard at once and are acknowledged when
+  the primary has them. A replica that misses a write is marked *stale* and
+  re-synced (export -> import) once it answers again. If a primary is down,
+  writes to its shard are refused rather than promoting a replica, so two
+  nodes can never diverge; reads continue from the replica.
+- **Search** fans out to one node per shard, takes each shard's top k and
+  merges by distance (or fused score for hybrid search). Filters, hybrid,
+  `search_many`, `scan`, `count`, `delete_where` and export all work across
+  shards. An edge is stored on the shards of both its endpoints, so
+  `neighbors` and `expand_hops` are complete; `graph_boost` spreads
+  activation within a shard.
+- **Operations:** `GET /cluster` shows every node's state; `POST
+  /cluster/resync` forces a resync; `/health` reports `degraded` when a node
+  is down. Maintenance actions (`checkpoint`, `compact`, `merge`, `tune_ef`)
+  run on every node.
+
+What it is not: there is no automatic primary election and no re-sharding of
+existing data when shards are added; a shard whose primary is down is
+read-only until it returns.
 
 ## How it works
 

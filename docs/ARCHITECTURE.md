@@ -321,10 +321,45 @@ serialized per collection; the HNSW build runs outside the lock and takes it
 only to install the finished segment. The HTTP server is a
 `ThreadingHTTPServer`, one thread per connection.
 
+## Cluster
+
+`cluster.py` is a router, not a new storage engine: the nodes are ordinary
+`stratadb serve` processes, and the router is the only component that knows
+there is more than one. It keeps one small piece of state of its own (which
+collections exist and how each is sharded, in `cluster-state.json`) and
+otherwise forwards.
+
+- **Placement** is static hash sharding: shard = `crc32(id) % shards`. Static
+  because the alternative, consistent hashing with migration, is a lot of
+  machinery for a system whose shard count is chosen once. `sharding: "none"`
+  pins a collection to shard 0 for whole-graph algorithms.
+- **Replication** is synchronous within a shard: a write goes to every live
+  node of the shard in parallel and is acknowledged once the primary has it.
+  A replica that fails the write is marked stale. The alternative (async
+  replication with a log position) is faster on writes but needs a catch-up
+  protocol; export-import resync of a stale replica is slower but needs
+  nothing new, and replicas are rarely down.
+- **Failover** is read-only: when a primary is unreachable, reads go to an
+  in-sync replica and writes to that shard are refused. Promoting a replica
+  automatically would need a consensus on who is primary (otherwise two
+  routers, or a router and a returning primary, can diverge), and that is a
+  different project. The honest guarantee: no two nodes ever accept
+  conflicting writes.
+- **Search** fans out to one node per shard and merges the per-shard top-k by
+  distance; since every shard returns its exact local top-k (within recall),
+  the merge is exact. Edges are written to the shards of both endpoints so
+  one-hop neighbourhoods are complete anywhere; spreading activation runs
+  per shard because its candidate pool is per shard.
+- **Health** is a loop probing `/health`; a node that comes back and is stale
+  is re-synced from its primary by dropping and re-importing each collection.
+
 ## Limits
 
-- Single process per collection: a `LOCK` file (flock / msvcrt) makes a
-  second process fail fast instead of corrupting the WAL.
+- Single process per collection directory: a `LOCK` file (flock / msvcrt)
+  makes a second process fail fast instead of corrupting the WAL. Scale-out is
+  by sharding across processes through the router, not by sharing a
+  directory.
+- Cluster mode has no automatic primary election and no re-sharding.
 - Everything except sealed vectors is held in memory.
 - The server has bearer-token auth only; put it behind TLS if it leaves
   localhost. The web console page itself is served without auth; every API

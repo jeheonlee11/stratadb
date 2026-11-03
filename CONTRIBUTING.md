@@ -37,6 +37,7 @@ on demand (workflow_dispatch); day-to-day development happens on macOS.
 | `stratadb/graph.py` | edges, node properties, BFS, shortest path, PageRank, components |
 | `stratadb/filters.py`, `metaindex.py`, `text_index.py` | metadata filters, secondary indexes, BM25 |
 | `stratadb/server.py`, `client.py`, `console.html` | HTTP API, client, web console |
+| `stratadb/cluster.py` | the router: shards, replicas, fan-out, failover, resync |
 | `docs/ARCHITECTURE.md` | the design and the reasons behind it; read this before changing the write path |
 
 ## Tests worth knowing about
@@ -50,6 +51,9 @@ on demand (workflow_dispatch); day-to-day development happens on macOS.
   `for i in $(seq 20); do pytest -q tests/test_background_seal.py; done`.
 - `tests/test_metaindex.py` compares indexed and unindexed collections on every
   filter shape; `tests/test_graph_algorithms.py` compares against networkx.
+- `tests/test_cluster.py` runs four node servers and a router in one process
+  and checks sharded results against a single embedded collection, then kills
+  and restarts nodes; `tests/test_cluster_cli.py` does it with real processes.
 - `tests/test_native.py` compares the C index with the numpy one (recall,
   exact search, filters, deletes, file interchange in both directions, mmap,
   concurrent searches); `tests/test_columns.py` compares column masks with the
