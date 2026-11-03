@@ -47,7 +47,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
 
-from . import __version__
+from . import __version__, native
 from .database import Database
 from .filters import FilterError
 
@@ -136,7 +136,8 @@ class Api:
     def handle(self, method: str, path: str, body: dict) -> Any:
         parts = [p for p in path.split("?")[0].split("/") if p]
         if parts == ["health"] and method == "GET":
-            return {"status": "ok", "version": __version__}
+            return {"status": "ok", "version": __version__,
+                    "index": "native" if native.available() else "python"}
         if not parts or parts[0] != "collections":
             raise ApiError(404, f"no route for {method} {path}")
         if len(parts) == 1:

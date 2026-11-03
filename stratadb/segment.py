@@ -17,6 +17,7 @@ from typing import Callable, Iterator
 
 import numpy as np
 
+from .columns import ColumnStore
 from .hnsw import HNSWIndex
 
 Hit = tuple[float, str]  # (distance, id)
@@ -66,10 +67,11 @@ class GrowingSegment:
         self.dim = dim
         self.metric = metric
         self._vectors = np.zeros((capacity, dim), dtype=np.float32)
+        self._live = np.zeros(capacity, dtype=bool)
         self.ids: list[str] = []
         self.metas: list[dict] = []
-        self.alive: list[bool] = []
         self.pos: dict[str, int] = {}
+        self.columns = ColumnStore(self.metas)  # vectorized filters, kept in step with puts/deletes
 
     def __len__(self) -> int:
         return len(self.pos)
@@ -80,24 +82,30 @@ class GrowingSegment:
             label = self.pos[rid]
             self._vectors[label] = vector
             self.metas[label] = meta
+            self.columns.invalidate_row(label)
             return
         label = len(self.ids)
         if label >= self._vectors.shape[0]:
-            bigger = np.zeros((self._vectors.shape[0] * 2, self.dim), dtype=np.float32)
+            cap = self._vectors.shape[0] * 2
+            bigger = np.zeros((cap, self.dim), dtype=np.float32)
             bigger[:label] = self._vectors[:label]
             self._vectors = bigger
+            live = np.zeros(cap, dtype=bool)
+            live[:label] = self._live[:label]
+            self._live = live
         self._vectors[label] = vector
+        self._live[label] = True
         self.ids.append(rid)
         self.metas.append(meta)
-        self.alive.append(True)
         self.pos[rid] = label
 
     def delete(self, rid: str) -> bool:
         label = self.pos.pop(rid, None)
         if label is None:
             return False
-        self.alive[label] = False
+        self._live[label] = False
         self.metas[label] = {}
+        self.columns.invalidate_row(label)
         return True
 
     def get(self, rid: str) -> tuple[np.ndarray, dict] | None:
@@ -111,17 +119,39 @@ class GrowingSegment:
             yield rid, self._vectors[label], self.metas[label]
 
     def search(self, q: np.ndarray, k: int, pred: Callable[[dict], bool] | None = None,
-               candidates: set[str] | None = None) -> list[Hit]:
-        pool = self.pos.values() if candidates is None else (self.pos[r] for r in candidates if r in self.pos)
-        labels = [label for label in pool if pred is None or pred(self.metas[label])]
-        if not labels:
+               candidates: set[str] | None = None, filter_expr: dict | None = None) -> list[Hit]:
+        """Exact search over the live records. ``filter_expr`` (the expression
+        ``pred`` came from) selects them through the columns; ``candidates``
+        from a metadata index narrow the pool first."""
+        n = len(self.ids)
+        if candidates is None and pred is None:
+            labels = np.flatnonzero(self._live[:n])
+        elif candidates is None and filter_expr is not None:
+            mask = self.columns.mask(filter_expr)
+            labels = np.flatnonzero(self._live[:n] if mask is None else mask & self._live[:n])
+        else:
+            pool = self.pos.values() if candidates is None else (self.pos[r] for r in candidates if r in self.pos)
+            labels = [label for label in pool if pred is None or pred(self.metas[label])]
+        if len(labels) == 0:
             return []
-        dists = distances(q, self._vectors[labels], self.metric)
+        if len(labels) * 4 >= n:
+            # Most rows qualify: one matrix product over the whole buffer (no
+            # copy), then rule the rest out, beats gathering the rows first.
+            dists = distances(q, self._vectors[:n], self.metric)
+            keep = np.zeros(n, dtype=bool)
+            keep[labels] = True
+            dists[~keep] = np.inf
+            labels = None
+        else:
+            dists = distances(q, self._vectors[labels], self.metric)
+        k = min(k, len(labels) if labels is not None else int(keep.sum()))
         if k < len(dists):
             top = np.argpartition(dists, k)[:k]
             top = top[np.argsort(dists[top])]
         else:
             top = np.argsort(dists)
+        if labels is None:
+            return [(float(dists[i]), self.ids[i]) for i in top]
         return [(float(dists[i]), self.ids[labels[i]]) for i in top]
 
     # Snapshot: only live records are written, so a reload compacts the segment.
@@ -168,6 +198,8 @@ class SealedSegment:
         self.ids = ids
         self.metas = metas
         self.pos = {rid: label for label, rid in enumerate(ids)}
+        self.columns = ColumnStore(metas)          # vectorized filters, built per field on first use
+        self._live = np.ones(len(ids), dtype=bool)  # False once tombstoned
 
     def __len__(self) -> int:
         return len(self.pos)
@@ -229,6 +261,7 @@ class SealedSegment:
     def _tombstone(self, label: int) -> None:
         self.index.mark_deleted(label)
         self.pos.pop(self.ids[label], None)
+        self._live[label] = False
 
     def delete(self, rid: str) -> bool:
         label = self.pos.get(rid)
@@ -265,6 +298,7 @@ class SealedSegment:
         pred: Callable[[dict], bool] | None = None,
         exact_limit: int = 0,
         candidates: set[str] | None = None,
+        filter_expr: dict | None = None,
     ) -> list[Hit]:
         """Search this segment, picking a plan:
 
@@ -274,6 +308,10 @@ class SealedSegment:
           (``candidates``, from a metadata index, limits which records the
           filter is even checked on)
         - HNSW otherwise (with the filter applied during the walk)
+
+        ``filter_expr`` is the filter ``pred`` was compiled from; given it (and
+        no ``candidates``), the matches come from the segment's columns in a
+        few numpy operations instead of one predicate call per record.
         """
         if not self.pos:
             return []
@@ -284,9 +322,13 @@ class SealedSegment:
             hits = self.index.search(q, k, ef=ef)
             return [(d, self.ids[label]) for label, d in hits]
 
-        pool = self.pos.values() if candidates is None else (self.pos[r] for r in candidates if r in self.pos)
-        allowed = [label for label in pool if pred is None or pred(self.metas[label])]
-        if not allowed:
+        if candidates is None and filter_expr is not None:
+            mask = self.columns.mask(filter_expr)
+            allowed = np.flatnonzero(self._live if mask is None else mask & self._live)
+        else:
+            pool = self.pos.values() if candidates is None else (self.pos[r] for r in candidates if r in self.pos)
+            allowed = [label for label in pool if pred is None or pred(self.metas[label])]
+        if len(allowed) == 0:
             return []
         # Selective filters: exact search over the few matches beats walking a
         # graph where almost every node is rejected.

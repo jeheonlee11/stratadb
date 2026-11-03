@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.0
+
+- **Native HNSW index.** The index is now also written in C
+  (`stratadb/native/hnsw.c`, loaded through ctypes; no Python or numpy C API).
+  Same algorithm and the same `index.npz` / `vectors.npy` files as the numpy
+  version, so existing segments load unchanged and either implementation can
+  read what the other wrote. `pip install` compiles it when a C compiler is
+  present and skips it otherwise; `python -m stratadb.native` reports which
+  index is in use, `python -m stratadb.native build` compiles it later, and
+  `STRATADB_NATIVE=0` forces the numpy index. `stats()["index"]` and
+  `GET /health` report `native` or `python`.
+- Segment builds use the native index in one call per segment and run on
+  worker threads instead of worker processes when it is loaded (the C code
+  releases the GIL), so nothing is pickled and small segments no longer wait
+  for a process to start.
+- **Vectorized filters on sealed segments.** The first filter on a field turns
+  it into a numpy column (float64 for numbers, integer codes for strings and
+  other values, presence and "other" masks); every operator then evaluates
+  over the whole segment in a few array operations, with per-row fallback only
+  for values the arrays can't decide (lists under `$eq`, odd comparisons).
+  Semantics are identical to the predicate, checked row for row by a
+  differential test on awkward values. Filtered search on 100k x 384 vectors
+  (no metadata index): 24.7 ms -> 1.4 ms.
+- Growing (and frozen) segments use the same columns, kept in step with
+  puts and deletes, and scan without copying the vector buffer when most rows
+  qualify: a 16k x 384 growing segment answers in 0.6 ms unfiltered and
+  0.7 ms with a 50% filter (was 3.8 ms / 2.9 ms).
+- `HNSWIndex.search(allow_labels=...)` takes the allowed labels as a
+  collection or array, which the native index turns into a byte mask;
+  segments use it instead of a Python callback per visited node.
+
 ## 0.7.0
 
 - `GET /metrics` in Prometheus text format: per-collection gauges (records,

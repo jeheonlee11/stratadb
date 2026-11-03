@@ -566,12 +566,14 @@ class Collection:
                             else (None, False))
             seg_pred = None if exact else pred  # exact index answers need no re-check
             if q is not None:
-                hits = self.growing.search(q, pool_k, seg_pred, cands)
+                seg_expr = None if seg_pred is None else filter
+                hits = self.growing.search(q, pool_k, seg_pred, cands, seg_expr)
                 for frozen in self.frozen.values():
-                    hits.extend(frozen.search(q, pool_k, seg_pred, cands))
+                    hits.extend(frozen.search(q, pool_k, seg_pred, cands, seg_expr))
                 for seg in self.sealed.values():
                     hits.extend(seg.search(q, pool_k, ef=max(ef, pool_k), pred=seg_pred,
-                                           exact_limit=self.config.exact_search_limit, candidates=cands))
+                                           exact_limit=self.config.exact_search_limit, candidates=cands,
+                                           filter_expr=seg_expr))
                 hits.sort()
                 scored = [(similarity(d, self.config.metric), d, rid) for d, rid in hits[:pool_k]]
                 if graph_boost > 0 and scored:
@@ -1234,6 +1236,7 @@ class Collection:
                 "count": len(self.locator),
                 "dim": self.config.dim,
                 "metric": self.config.metric,
+                "index": "native" if native.available() else "python",
                 "growing": len(self.growing),
                 "sealing": sum(len(f) for f in self.frozen.values()),
                 "sealed_segments": [

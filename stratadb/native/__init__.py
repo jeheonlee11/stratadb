@@ -4,7 +4,9 @@ The library is built by ``pip install`` when a C compiler is available (see
 ``setup.py``), or on demand with ``python -m stratadb.native build``. It is
 loaded through ``ctypes``; nothing here needs the Python or numpy C API.
 
-Set ``STRATADB_NATIVE=0`` to ignore the library and use the pure-Python index.
+Set ``STRATADB_NATIVE=0`` to ignore the library and use the pure-Python index;
+``STRATADB_NATIVE_LIB=/path/to/lib.so`` loads that build instead of the
+installed one.
 """
 
 from __future__ import annotations
@@ -72,7 +74,8 @@ def load() -> ctypes.CDLL | None:
     if os.environ.get(_ENV_FLAG, "1").lower() in ("0", "false", "no", "off"):
         _error = f"disabled by {_ENV_FLAG}"
         return None
-    for path in library_candidates():
+    override = os.environ.get(_ENV_FLAG + "_LIB")  # a specific build, for development
+    for path in ([Path(override)] if override else library_candidates()):
         try:
             _lib = _bind(ctypes.CDLL(str(path)))
             return _lib

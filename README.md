@@ -1,12 +1,14 @@
 # StrataDB
 
-An embedded, **graph-native vector database** in pure Python + numpy.
+An embedded, **graph-native vector database** in Python + numpy, with its
+HNSW index also written in C.
 
 StrataDB stores vectors, JSON metadata **and typed, weighted edges between
 records** in one place, so retrieval can follow relationships instead of
 stopping at the nearest neighbours. It is built from the ground up: its own
-HNSW index, write-ahead log, segment lifecycle, crash recovery, filter
-engine, HTTP server and client. The only dependency is numpy.
+HNSW index (pure-numpy and native C versions of the same algorithm, sharing
+one file format), write-ahead log, segment lifecycle, crash recovery, filter
+engine, HTTP server and client. The only Python dependency is numpy.
 
 ```python
 from stratadb import Database
@@ -67,7 +69,11 @@ activation, so a weak, barely related match can't promote its neighbours.
 
 - **HNSW index from scratch**: layered graph, heuristic neighbour selection,
   cosine / inner product / L2. Recall matches hnswlib within about one point
-  at the same parameters (see [Benchmarks](#benchmarks)).
+  at the same parameters (see [Benchmarks](#benchmarks)). The index exists
+  twice, in numpy and in C (`stratadb/native/hnsw.c`, about 600 lines,
+  loaded through ctypes). The C version builds about 10x faster and answers
+  queries in well under a millisecond on 100k vectors; the numpy version is
+  the fallback when there is no C compiler, and both read each other's files.
 - **Durable writes**: CRC-framed write-ahead log with raw float32 vectors;
   torn or corrupt tails are detected and truncated on open.
 - **Segments**: writes land in a brute-force growing segment, which seals
@@ -114,7 +120,14 @@ activation, so a weak, barely related match can't promote its neighbours.
 ```bash
 pip install -e .            # Python 3.10+, numpy is the only dependency
 pip install -e ".[dev]"     # + pytest
+python -m stratadb.native   # which HNSW index is in use: native or python
 ```
+
+`pip install` compiles the C index when a C compiler is present (clang, gcc
+or MSVC) and silently skips it otherwise; StrataDB then runs on the numpy
+index with identical results, just slower builds and queries. To compile it
+later, `python -m stratadb.native build`. `STRATADB_NATIVE=0` forces the
+numpy index, which the test suite runs in both modes.
 
 ## Use it embedded
 

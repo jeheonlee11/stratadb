@@ -1,7 +1,8 @@
 # StrataDB architecture
 
-StrataDB is an embedded vector database written in Python and numpy. This
-document explains how data moves through it and why it is built this way.
+StrataDB is an embedded vector database written in Python and numpy, with
+the HNSW index also implemented in C. This document explains how data moves
+through it and why it is built this way.
 
 ```
             upsert / delete / link
@@ -60,16 +61,20 @@ and a new growing segment takes its place. A worker thread builds the HNSW
 index while the frozen segment keeps answering queries by brute force. Writes
 are never blocked by an index build.
 
-Several segments can be in this state at once. Each build runs in a worker
-**process** (`build_processes`, default 2) so it uses its own CPU core instead
-of sharing the main process's GIL; a bulk load that seals four segments
-builds them four-wide. Workers start with `spawn`, never `fork`: the main
-process runs background threads holding locks, and a forked child would
+Several segments can be in this state at once (`build_processes`, default
+2), each on its own CPU core; a bulk load that seals four segments builds
+them four-wide. With the native index the builds run on worker **threads**:
+the C code releases the GIL for the whole build, so threads already use every
+core and the vectors never leave the process. With the numpy index each build
+runs in a worker **process** instead, since Python code would otherwise share
+the main process's GIL. Those workers start with `spawn`, never `fork`: the
+main process runs background threads holding locks, and a forked child would
 inherit those locks in a held state. Segments under
-`build_process_min_records` build in-process, since starting a worker costs
-about a second. If a worker can't start at all (spawn re-imports `__main__`,
-which fails under a REPL, a notebook or `python -`), the collection notes it
-and builds in-process from then on; nothing is lost either way.
+`build_process_min_records` build in-process, since starting a worker process
+costs about a second. If a worker can't start at all (spawn re-imports
+`__main__`, which fails under a REPL, a notebook or `python -`), the
+collection notes it and builds in-process from then on; nothing is lost
+either way.
 
 **Sealed.** The built segment is written to `seg-N/` (`index.npz` for the
 graph structure, `vectors.npy` for the vectors, `records.json` for ids and
@@ -104,9 +109,10 @@ merged. Each sealed segment picks a plan:
 | filter matches few records | exact scan over the matches |
 | otherwise | HNSW, with the filter checked during the walk; `ef` widens until k allowed hits are found |
 
-The exact-scan threshold exists because this is Python: below a few million
-floats, one numpy matrix product beats walking a graph node by node, and it
-is exact.
+The exact-scan threshold exists because a numpy matrix product over a small
+segment is both fast and exact: below a couple of million floats it ties or
+beats the graph walk even with the native index (at 384 dimensions the two
+cross at about 10k vectors), and it never misses a neighbour.
 
 ## HNSW
 
@@ -116,14 +122,33 @@ search with a dynamic candidate list (`ef`) on layer 0, and the paper's
 neighbour-selection heuristic (keep a candidate only if it is closer to the
 new node than to any neighbour already kept). Layer 0 allows `2*M` links.
 
-Neighbour selection computes all candidate-to-candidate distances in one
-matrix product and keeps a running "distance to nearest kept neighbour"
-vector, instead of one numpy call per pair. That change made builds about 4x
-faster.
+The index exists twice:
+
+- `PyHNSWIndex` (numpy). Neighbour selection computes all
+  candidate-to-candidate distances in one matrix product and keeps a running
+  "distance to nearest kept neighbour" vector, instead of one numpy call per
+  pair.
+- `NativeHNSWIndex` (`native/hnsw.c`, loaded through ctypes). The same
+  algorithm, step for step, in C: vectors in one flat array, level-0 links in
+  a fixed-width table of `2*M` slots per node, upper-level links in a pool of
+  `M`-slot rows, a per-thread epoch-stamped visited array (no clearing between
+  queries, and concurrent searches never share state), and 8-way unrolled
+  distance loops the compiler vectorizes. There is no Python or numpy C API
+  involved, so a single `cc -O3 -shared` builds it and ctypes releases the
+  GIL for every call.
+
+`HNSWIndex` is whichever one is in use (`python -m stratadb.native` says
+which; `STRATADB_NATIVE=0` forces numpy). Both write and read the same
+`index.npz` (levels, CSR-packed links, deleted labels, entry point) and the
+same `vectors.npy`, so a segment built by one loads in the other, and a
+differential test checks that a round trip through either leaves the graph
+byte-for-byte identical.
 
 Measured against hnswlib (C++) with the same `M=16, ef_construction=128` on
 20k x 384 vectors, recall@10 is within about one point on both easy and hard
-data. Builds are roughly 25-40x slower, the cost of pure Python.
+data for either implementation. The numpy build is 25-40x slower than hnswlib;
+the C build is within about 2x of it, the remaining gap being hnswlib's
+hand-written SIMD kernels and prefetching.
 
 ## Checkpoints and recovery
 
