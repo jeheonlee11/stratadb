@@ -101,7 +101,10 @@ segment past the ratio starts this on a worker thread.
 ## Search
 
 For each query, every segment returns its local top-k and the results are
-merged. Each sealed segment picks a plan:
+merged. With the native index, sealed segments past the exact-scan size are
+searched on `search_threads` threads at once (the C walk runs without the
+GIL), so a collection of several segments answers in about the time of its
+slowest one. Each sealed segment picks a plan:
 
 | situation | plan |
 |---|---|
@@ -156,6 +159,23 @@ The index exists twice:
   distance loops the compiler vectorizes. There is no Python or numpy C API
   involved, so a single `cc -O3 -shared` builds it and ctypes releases the
   GIL for every call.
+
+**Quantized traversal.** Search time is bound by memory latency: each
+candidate's vector is a random row of a buffer far larger than cache. The
+native index therefore keeps, per sealed segment, an 8-bit code of every
+vector (`codes.npy`; per-dimension min and max over the segment, 255 steps
+between) and walks the graph on those. A code row is a quarter the size of
+the float row, and the distance is a float-by-uint8 dot product plus two
+per-query constants (`dot(q, x) = sum(q*qmin) + sum(q*qscale*code)`; for L2
+the decoded squared norm of each row is stored too). The codes only choose
+the candidates: the `ef` nodes the walk ends with are re-scored with the
+float32 vectors before the top k are returned, so the distances a caller
+sees are exact and recall is indistinguishable from the float walk (the
+candidate set differs in a few places where codes misorder near-ties, but a
+near-tie is by definition not what decides recall). Inserts always use the
+floats; adding to a quantized index drops its codes. On reopen both
+`codes.npy` and `vectors.npy` are memory-mapped, and a query touches only
+the codes plus `ef` float rows, so the hot working set shrinks about 4x.
 
 `HNSWIndex` is whichever one is in use (`python -m stratadb.native` says
 which; `STRATADB_NATIVE=0` forces numpy). Both write and read the same

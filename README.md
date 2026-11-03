@@ -74,6 +74,10 @@ activation, so a weak, barely related match can't promote its neighbours.
   loaded through ctypes). The C version builds about 10x faster and answers
   queries in well under a millisecond on 100k vectors; the numpy version is
   the fallback when there is no C compiler, and both read each other's files.
+- **8-bit quantized traversal**: sealed segments store uint8 codes beside the
+  float32 vectors; searches walk the graph on the codes and re-rank with the
+  floats, so they run ~1.8x faster with exact distances and unchanged recall.
+  Several segments are searched in parallel.
 - **Durable writes**: CRC-framed write-ahead log with raw float32 vectors;
   torn or corrupt tails are detected and truncated on open.
 - **Segments**: writes land in a brute-force growing segment, which seals
@@ -244,35 +248,37 @@ queries, recall against exact cosine top-10
 
 | search | recall@10 | p50 | p95 |
 |---|---|---|---|
-| HNSW, ef=32 | 0.978 | 0.10 ms | 0.32 ms |
-| HNSW, ef=64 | 0.990 | 0.12 ms | 0.20 ms |
-| HNSW, ef=128 | **0.999** | 0.20 ms | 0.30 ms |
+| HNSW, ef=32 | 0.977 | 0.11 ms | 0.25 ms |
+| HNSW, ef=64 | 0.989 | 0.15 ms | 0.28 ms |
+| HNSW, ef=128 | **0.999** | 0.27 ms | 0.45 ms |
 | exact scan (planner's small-segment path) | 1.000 | 6.8 ms | 8.6 ms |
 
 - Writes are acknowledged at about **280,000 vectors/s** (WAL append + growing
-  segment). The whole 20k x 384 set is indexed **6.9 s** after the last write
+  segment). The whole 20k x 384 set is indexed **8 s** after the last write
   (`seal_threshold=5000`: four segments, built on four worker threads).
-- On disk: 33 MB for 20k x 384 vectors with index. Reopening takes under 0.1 s.
+- On disk: 41 MB for 20k x 384 vectors with index and 8-bit codes. Reopening
+  takes under 0.1 s.
 
 **Scaling to 100k vectors** (embedding-like synthetic data, 384 dims,
-`bench/ann_bench.py --data manifold --n 100000 --procs 4`):
+`bench/ann_bench.py --data manifold --n 100000 --procs 4`; sealed segments
+quantized and searched on 4 threads):
 
 | segments | recall@10 (ef=32 / 64 / 128) | p50 (ef=32 / 64 / 128) | build | disk |
 |---|---|---|---|---|
-| 7 x 16k (`seal_threshold=16384`, default) | 0.966 / 0.994 / **1.000** | 4.1 ms / 6.9 ms / 12.0 ms | **13.4 s** | 169 MB |
-| 2 x 50k (`seal_threshold=50000`) | 0.816 / 0.934 / 0.986 | **1.0 ms / 1.6 ms / 2.9 ms** | 36.2 s | 169 MB |
+| 7 x 16k (`seal_threshold=16384`, default) | 0.966 / 0.994 / **1.000** | 0.64 ms / 0.91 ms / 1.46 ms | **14.8 s** | 208 MB |
+| 2 x 50k (`seal_threshold=50000`) | 0.812 / 0.933 / 0.986 | **0.34 ms / 0.47 ms / 0.70 ms** | 43.6 s | 208 MB |
 
-Reopening the 100k collection takes 0.1 s (vectors are memory-mapped). A
-filter that keeps half the records (`{"even": true}`, no metadata index) costs
-about one extra millisecond per segment; it is evaluated as a numpy mask over
-the segment's columns, not per record.
+Reopening the 100k collection takes 0.1 s (vectors and codes are
+memory-mapped). A filter that keeps half the records (`{"even": true}`, no
+metadata index) adds under a millisecond: it is evaluated as a numpy mask
+over the segment's columns, not per record. Numbers for 0.8.0, before the
+8-bit codes and parallel search: 6.9 ms and 1.6 ms at ef=64 for the two
+layouts.
 
-A query walks every segment's graph, so fewer, larger segments are about 4x
-faster per query; smaller segments give higher recall at the same `ef` and
-cheaper, more frequent, more parallel background builds. Pick
-`seal_threshold` for the workload: large for read-heavy, small for
-write-heavy. (A 50k segment at ef=64 is roughly as accurate as a 16k one at
-ef=32, and faster.)
+Fewer, larger segments are faster per query; smaller segments give higher
+recall at the same `ef`, build faster and in parallel, and now cost little
+extra per query since they are searched concurrently. The default is a
+reasonable middle; raise `seal_threshold` for read-heavy, static data.
 
 **Filtered search with secondary indexes** (same 20k vectors, `index_fields=["src", "year"]`):
 
