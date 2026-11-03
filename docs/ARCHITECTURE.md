@@ -166,9 +166,13 @@ byte-for-byte identical.
 
 Measured against hnswlib (C++) with the same `M=16, ef_construction=128` on
 20k x 384 vectors, recall@10 is within about one point on both easy and hard
-data for either implementation. The numpy build is 25-40x slower than hnswlib;
-the C build is within about 2x of it, the remaining gap being hnswlib's
-hand-written SIMD kernels and prefetching.
+data for either implementation. The numpy build is 25-40x slower than hnswlib.
+The C build is about 2x faster than hnswlib's pip wheel on Apple Silicon and
+answers queries in half the time, but only because hnswlib's SIMD kernels are
+x86-only; on x86 hnswlib should win. Search time is bound by memory latency,
+not arithmetic: a distance costs ~95 ns on a 3k-vector index that sits in
+cache and ~420 ns on a 50k-vector one (384 dims), and software prefetching
+measured neutral here.
 
 ## Checkpoints and recovery
 

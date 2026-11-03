@@ -244,38 +244,35 @@ queries, recall against exact cosine top-10
 
 | search | recall@10 | p50 | p95 |
 |---|---|---|---|
-| HNSW, ef=32 | 0.978 | 0.48 ms | 0.77 ms |
-| HNSW, ef=64 | 0.990 | 0.78 ms | 1.15 ms |
-| HNSW, ef=128 | **0.999** | 1.53 ms | 2.10 ms |
+| HNSW, ef=32 | 0.978 | 0.10 ms | 0.32 ms |
+| HNSW, ef=64 | 0.990 | 0.12 ms | 0.20 ms |
+| HNSW, ef=128 | **0.999** | 0.20 ms | 0.30 ms |
 | exact scan (planner's small-segment path) | 1.000 | 6.8 ms | 8.6 ms |
 
-- Writes are acknowledged at about **260,000 vectors/s** (WAL append + growing
-  segment). Index builds run in worker processes, several at a time
-  (`seal_threshold=5000`, so four segments):
-
-  | `build_processes` | 20k x 384 indexed in |
-  |---|---|
-  | 0 (in-process) | 30.0 s |
-  | 2 | 15.3 s |
-  | 4 | **7.6 s** |
+- Writes are acknowledged at about **280,000 vectors/s** (WAL append + growing
+  segment). The whole 20k x 384 set is indexed **6.9 s** after the last write
+  (`seal_threshold=5000`: four segments, built on four worker threads).
 - On disk: 33 MB for 20k x 384 vectors with index. Reopening takes under 0.1 s.
 
 **Scaling to 100k vectors** (embedding-like synthetic data, 384 dims,
-`bench/ann_bench.py --data manifold --n 100000`):
+`bench/ann_bench.py --data manifold --n 100000 --procs 4`):
 
-| segments | recall@10 (ef=64 / 128) | p50 (ef=64 / 128) | build (1 core / 4 workers) | disk |
+| segments | recall@10 (ef=32 / 64 / 128) | p50 (ef=32 / 64 / 128) | build | disk |
 |---|---|---|---|---|
-| 7 x 16k (`seal_threshold=16384`, default) | 0.987 / **0.999** | 8.8 ms / 15.6 ms | 225 s / **113 s** | 169 MB |
-| 2 x 50k (`seal_threshold=50000`) | 0.934 / 0.986 | **2.7 ms / 4.7 ms** | 256 s / – | 169 MB |
+| 7 x 16k (`seal_threshold=16384`, default) | 0.966 / 0.994 / **1.000** | 4.1 ms / 6.9 ms / 12.0 ms | **13.4 s** | 169 MB |
+| 2 x 50k (`seal_threshold=50000`) | 0.816 / 0.934 / 0.986 | **1.0 ms / 1.6 ms / 2.9 ms** | 36.2 s | 169 MB |
 
-Reopening the 100k collection takes 0.36 s (vectors are memory-mapped). With
-4 workers the 7 segments build in two rounds, so the speedup is 2x rather
-than 4x; more, smaller segments parallelize better.
+Reopening the 100k collection takes 0.1 s (vectors are memory-mapped). A
+filter that keeps half the records (`{"even": true}`, no metadata index) costs
+about one extra millisecond per segment; it is evaluated as a numpy mask over
+the segment's columns, not per record.
 
-A query walks every segment's graph, so fewer, larger segments are about 3x
+A query walks every segment's graph, so fewer, larger segments are about 4x
 faster per query; smaller segments give higher recall at the same `ef` and
-cheaper, more frequent background builds. Pick `seal_threshold` for the
-workload: large for read-heavy, small for write-heavy.
+cheaper, more frequent, more parallel background builds. Pick
+`seal_threshold` for the workload: large for read-heavy, small for
+write-heavy. (A 50k segment at ef=64 is roughly as accurate as a 16k one at
+ef=32, and faster.)
 
 **Filtered search with secondary indexes** (same 20k vectors, `index_fields=["src", "year"]`):
 
@@ -289,18 +286,25 @@ A differential test runs every filter shape against indexed and unindexed
 twins (with tricky values: `1` vs `1.0` vs `True`, `None`, lists, NaN, numeric
 strings) and requires identical results.
 
-**Index quality vs. a reference implementation.** Same vectors and
-parameters (`M=16, ef_construction=128`, 20k x 384) through StrataDB's HNSW
-and [hnswlib](https://github.com/nmslib/hnswlib) (C++):
+**Against a reference implementation.** Same vectors and parameters
+(`M=16, ef_construction=128`, 20k x 384, one thread) through StrataDB's C
+index and [hnswlib](https://github.com/nmslib/hnswlib) (C++, the pip wheel):
 
-| data | ef | StrataDB recall@10 | hnswlib recall@10 |
+| data | ef | StrataDB recall@10 / query | hnswlib recall@10 / query |
 |---|---|---|---|
-| embedding-like (low intrinsic dimension) | 64 | 0.959 | 0.950 |
-| embedding-like | 128 | 0.993 | 0.991 |
-| hard: isotropic noise inside clusters | 128 | 0.687 | 0.707 |
+| embedding-like (low intrinsic dimension) | 64 | 0.948 / 0.31 ms | 0.938 / 0.63 ms |
+| embedding-like | 128 | 0.991 / 0.51 ms | 0.990 / 1.10 ms |
+| hard: isotropic noise inside clusters | 64 | 0.565 / 0.19 ms | 0.532 / 0.35 ms |
+| hard | 128 | 0.687 / 0.26 ms | 0.712 / 0.52 ms |
+| **build**, embedding-like | | **9.4 s** | 19.6 s |
+| **build**, hard | | **5.1 s** | 8.8 s |
 
-Recall matches within about a point. Builds are about 25-40x slower than
-hnswlib, the cost of pure Python, which is why they run in the background.
+Recall matches within about a point either way. The speed comparison is
+specific to Apple Silicon: hnswlib's hand-written SIMD kernels are x86-only,
+so on this machine it runs scalar code while StrataDB's kernels use the
+compiler's vector extensions. On x86 expect hnswlib to be the faster of the
+two. The numpy index gives the same recall and builds about 25x slower than
+the C one.
 
 Reproduce the synthetic runs with `python bench/ann_bench.py --data manifold`
 (or `--data clustered`).
