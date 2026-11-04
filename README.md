@@ -1,129 +1,17 @@
-# StrataDB
-
-An embedded, **graph-native vector database** in Python + numpy, with its
-HNSW index also written in C.
-
-StrataDB stores vectors, JSON metadata **and typed, weighted edges between
-records** in one place, so retrieval can follow relationships instead of
-stopping at the nearest neighbours. It is built from the ground up: its own
-HNSW index (pure-numpy and native C versions of the same algorithm, sharing
-one file format), write-ahead log, segment lifecycle, crash recovery, filter
-engine, HTTP server and client. The only Python dependency is numpy.
-
-```python
-from stratadb import Database
-
-db = Database("./data")
-kb = db.create_collection("kb", dim=384, text_field="text")
-
-kb.upsert(ids, vectors, metadata)                         # durable once it returns
-kb.link([{"src": "ana", "dst": "voltcell", "rel": "works_at"}])
-
-kb.search(q, k=5)                                         # nearest neighbours
-kb.search(q, k=5, filter={"year": {"$gte": 2020}})        # with metadata filters
-kb.search(q, k=5, expand_hops=1)                          # attach each hit's neighbourhood
-kb.search(q, k=5, graph_boost=0.4)                        # re-rank by spreading activation over edges
-kb.search(q, k=5, graph_boost=0.4, graph_rels=["cites"])   # ...following only those relation types
-kb.neighbors("ana", hops=2, filter={"kind": "person"})     # neighbourhood, filtered by metadata
-kb.search(q, text="E1042 checksum", k=5)                  # hybrid: vector + BM25 keyword, fused
-kb.search_many(queries, k=5)                               # many queries, one call
-kb.search(q, k=5, fields=["title", "meta.page"])           # return only those metadata keys
-kb.tune_ef(target_recall=0.95, apply=True)                 # pick the smallest ef that hits the target
-```
-
-## Why graph-native
-
-Vector search answers "what text looks like my question?". Many questions
-need one more step: *who works at* the companies that match, *which papers
-cite* the ones that match. In a plain vector store that step means a second
-database and glue code.
-
-In StrataDB, `graph_boost` runs spreading activation over the edges: records
-that clearly match pass activation along their edges, and linked records,
-including ones the vector search missed entirely, move up. From
-[`examples/graph_retrieval.py`](examples/graph_retrieval.py):
-
-```
-Q: people employed by a battery manufacturer
-
-vector search only:
-  0.61  gridstore GridStore is a battery manufacturer for solar farms.
-  0.58  voltcell  VoltCell is a battery manufacturer supplying electric car makers.
-  0.21  ana       Ana joined VoltCell in 2021 as a mechanical engineer.
-  0.19  bakery    Crumb & Co is a bakery chain famous for sourdough.
-
-vector search + graph_boost=0.4:
-  0.49  ana       (vector 0.21, graph 0.91)  Ana joined VoltCell in 2021 as a mechanical engineer.
-  0.40  ben       (vector 0.00, graph 1.00)  Ben leads firmware at GridStore.
-  0.37  gridstore (vector 0.61, graph 0.00)  GridStore is a battery manufacturer for solar farms.
-  0.35  voltcell  (vector 0.58, graph 0.00)  VoltCell is a battery manufacturer supplying electric car makers.
-```
-
-Ben's description shares no words with the question; he is found only
-through the `works_at` edge.
-
-Only candidates that score above the pool's background level spread
-activation, so a weak, barely related match can't promote its neighbours.
-
 ## Features
 
-- **HNSW index from scratch**: layered graph, heuristic neighbour selection,
-  cosine / inner product / L2. Recall matches hnswlib within about one point
-  at the same parameters (see [Benchmarks](#benchmarks)). The index exists
-  twice, in numpy and in C (`stratadb/native/hnsw.c`, about 600 lines,
-  loaded through ctypes). The C version builds about 10x faster and answers
-  queries in well under a millisecond on 100k vectors; the numpy version is
-  the fallback when there is no C compiler, and both read each other's files.
-- **8-bit quantized traversal**: sealed segments store uint8 codes beside the
-  float32 vectors; searches walk the graph on the codes and re-rank with the
-  floats, so they run ~1.8x faster with exact distances and unchanged recall.
-  Several segments are searched in parallel.
-- **Durable writes**: CRC-framed write-ahead log with raw float32 vectors;
-  torn or corrupt tails are detected and truncated on open.
-- **Segments**: writes land in a brute-force growing segment, which seals
-  into an HNSW-indexed segment **in a background worker process** while
-  staying searchable. Several segments build at once, so bulk loads scale
-  with cores: 4 workers index 20k x 384 vectors 4x faster than one. After a
-  bulk load, `merge(n)` rewrites the sealed segments into `n` larger ones for
-  faster queries: on 20k real embeddings, merging 4 segments into 1 took 30 s and cut
-  p50 search from 4.2 ms to 1.1 ms at recall 0.9985. Deletes are tombstones; segments heavy with them are compacted
-  automatically in the background (the rebuild runs outside the lock, so
-  reads and writes never wait for it).
-- **Crash recovery**: generation-numbered snapshots plus an atomically
-  swapped manifest; opening a collection replays the WAL. Tested by
-  reopening without `close()`, mid-build crashes and truncated logs.
-- **Query planner**: small segments and selective filters use an exact scan
-  (faster than a Python graph walk at that size, and exact); large ones use
-  HNSW with the filter applied during the walk.
-- **Metadata filters**: `$eq $ne $gt $gte $lt $lte $in $nin $contains $prefix
-  $exists`, dotted paths, `$and $or $not`.
-- **Secondary indexes** (`index_fields`): hash indexes for equality / `$in`
-  and sorted arrays for numeric ranges narrow filtered searches before any
-  record is checked; when the indexes answer the whole filter, the per-record
-  check is skipped entirely. Up to 60x faster filtered search.
-- **Graph layer**: typed, weighted edges with properties, node properties,
-  N-hop neighbours, `expand_hops` and `graph_boost` in search, cascade on
-  delete. Graph-only collections (`dim=0`) hold a knowledge graph with no
-  vectors at all.
-- **Graph algorithms**: shortest paths (typed / directed), weighted PageRank
-  and personalized PageRank (verified against networkx to 1e-6), connected
-  components.
-- **Hybrid search**: a BM25 keyword index over one metadata field, fused with
-  vector results by reciprocal rank fusion. Catches exact tokens (error codes,
-  function names, part numbers) that embeddings blur.
-- **Server, client and console**: standard-library JSON/HTTP server with
-  optional bearer-token auth, a client with the same method names as the
-  embedded API, and a built-in web console (collections, filtered scans,
-  keyword search, "more like this", graph explorer).
-- **Online backups**: a point-in-time copy of a live database. **JSONL
-  export/import** of records, nodes and edges for moving data between
-  versions or tools.
-- **Clustering**: `stratadb cluster` runs a router over several servers.
-  Collections are hash-sharded across shards and replicated within each;
-  searches fan out and merge; a dead primary fails reads over to its replica,
-  and a replica that missed writes is re-synced from the primary when it
-  returns. Same HTTP API, so clients and the console need no changes
-  (see [Cluster](#cluster)).
+- **HNSW index from scratch**, in numpy and in C (`stratadb/native/hnsw.c`, about 600 lines, loaded through ctypes). Recall matches hnswlib within about one point; both versions share one file format.
+- **8-bit quantized search**: walks the graph on uint8 codes and re-ranks with float32, about 1.8x faster with exact distances.
+- **Durable writes**: CRC-framed write-ahead log; corrupt tails are truncated on open.
+- **Background indexing**: new writes are searched by brute force while HNSW segments build in parallel worker processes. Deletes are tombstones, compacted automatically.
+- **Crash recovery**: generation-numbered snapshots, an atomically swapped manifest, and WAL replay.
+- **Query planner**: exact scan for small segments and narrow filters, HNSW otherwise.
+- **Metadata filters and secondary indexes**: `$eq $ne $gt $gte $lt $lte $in $nin $contains $prefix $exists`, `$and $or $not`; indexes make filtered search up to 60x faster.
+- **Graph layer**: typed, weighted edges, N-hop neighbours, `graph_boost` re-ranking, shortest paths, PageRank and connected components.
+- **Hybrid search**: a BM25 keyword index fused with vector results by reciprocal rank fusion.
+- **Server, client and web console** with optional bearer-token auth.
+- **Online backups** and JSONL export/import.
+- **Clustering**: hash sharding, synchronous replication and read failover through a router (see [Cluster](#cluster)).
 
 ## Install
 
